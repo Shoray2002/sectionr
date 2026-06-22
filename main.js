@@ -59,6 +59,7 @@ let renderer, camera, scene, controls;
 let model, projection, drawThroughProjection, group;
 let outputContainer;
 let abortController;
+let generating = false;
 
 init();
 
@@ -136,6 +137,7 @@ async function init() {
 	bind( 'perObjectColors' );
 	document.getElementById( 'rotate' ).addEventListener( 'click', params.rotate );
 	document.getElementById( 'regenerate' ).addEventListener( 'click', params.regenerate );
+	document.getElementById( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
 
 	render();
 
@@ -162,7 +164,8 @@ async function updateEdges() {
 
 	}
 
-	abortController = new AbortController();
+	const myController = new AbortController();
+	abortController = myController;
 
 	projection.geometry.dispose();
 	projection.material.dispose();
@@ -178,7 +181,10 @@ async function updateEdges() {
 	const generator = new ProjectionGenerator( renderer );
 	generator.includeIntersectionEdges = params.includeIntersectionEdges;
 
+	// the generator reads each mesh's .visible flag for the occlusion pass, so the
+	// model must stay visible for the whole async generation — guard render() with this.
 	model.visible = true;
+	generating = true;
 	let input = [ model ];
 	if ( params.visibilityCullMeshes ) {
 
@@ -190,7 +196,7 @@ async function updateEdges() {
 	try {
 
 		result = await generator.generate( input, {
-			signal: abortController.signal,
+			signal: myController.signal,
 			onProgress: ( p, msg ) => {
 
 				outputContainer.innerText = `${ msg }... ${ ( p * 100 ).toFixed( 2 ) }%`;
@@ -200,7 +206,14 @@ async function updateEdges() {
 
 	} catch {
 
-		// cancelled
+		// aborted by a newer call, or failed — only reset if we're still the active run
+		if ( abortController === myController ) {
+
+			generating = false;
+			model.visible = params.displayModel;
+
+		}
+
 		return;
 
 	}
@@ -229,7 +242,55 @@ async function updateEdges() {
 	const elapsed = window.performance.now() - timeStart;
 	outputContainer.innerText = `Generation time: ${ elapsed.toFixed( 2 ) }ms`;
 
+	generating = false;
+	model.visible = params.displayModel;
+	document.getElementById( 'downloadSVG' ).disabled = false;
 	needsRender = true;
+
+}
+
+// Export the visible projection as an SVG. Lines lie on the XZ plane (y=0),
+// so we use x and z; z is flipped so the top-down view isn't mirrored.
+function downloadSVG() {
+
+	const p = projection.geometry.attributes.position;
+	if ( ! p || p.count === 0 ) return;
+
+	let minX = Infinity, minY = Infinity, maxX = - Infinity, maxY = - Infinity;
+	for ( let i = 0; i < p.count; i ++ ) {
+
+		const x = p.getX( i ), y = - p.getZ( i );
+		if ( x < minX ) minX = x; if ( y < minY ) minY = y;
+		if ( x > maxX ) maxX = x; if ( y > maxY ) maxY = y;
+
+	}
+
+	const w = maxX - minX, h = maxY - minY;
+	if ( ! isFinite( w ) || w <= 0 || h <= 0 ) return;
+
+	const mm = 300 / Math.max( w, h );      // longest side → 300mm
+	const stroke = Math.max( w, h ) / 800;
+	const minLen2 = ( Math.max( w, h ) * 1e-4 ) ** 2; // drop degenerate/near-zero segments
+
+	let d = '';
+	for ( let i = 0; i < p.count; i += 2 ) {
+
+		const ax = p.getX( i ) - minX, ay = - p.getZ( i ) - minY;
+		const bx = p.getX( i + 1 ) - minX, by = - p.getZ( i + 1 ) - minY;
+		if ( ( bx - ax ) ** 2 + ( by - ay ) ** 2 < minLen2 ) continue;
+		d += `M${ ax.toFixed( 4 ) } ${ ay.toFixed( 4 ) }L${ bx.toFixed( 4 ) } ${ by.toFixed( 4 ) }`;
+
+	}
+
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${ ( w * mm ).toFixed( 2 ) }mm" height="${ ( h * mm ).toFixed( 2 ) }mm" viewBox="0 0 ${ w.toFixed( 4 ) } ${ h.toFixed( 4 ) }">
+  <path d="${ d }" fill="none" stroke="#000" stroke-width="${ stroke.toFixed( 5 ) }" stroke-linecap="butt"/>
+</svg>`;
+
+	const a = document.createElement( 'a' );
+	a.href = URL.createObjectURL( new Blob( [ svg ], { type: 'image/svg+xml' } ) );
+	a.download = 'projection.svg';
+	a.click();
+	URL.revokeObjectURL( a.href );
 
 }
 
@@ -265,7 +326,7 @@ function render() {
 
 	requestAnimationFrame( render );
 
-	if ( model ) model.visible = params.displayModel;
+	if ( model && ! generating ) model.visible = params.displayModel;
 	drawThroughProjection.visible = params.displayDrawThroughProjection;
 
 	if ( needsRender ) {
