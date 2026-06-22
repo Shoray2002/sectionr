@@ -6,29 +6,30 @@
   <title>sectionr — 3D → plotter SVG</title>
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    html, body { margin: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; background: #141414; color: #e5e7eb; }
     #app { display: flex; height: 100%; }
-    #view { flex: 1; position: relative; background: #eee; min-width: 0; }
+    #view { flex: 1; position: relative; background: #141414; min-width: 0; }
     #view canvas { display: block; }
     #panel {
       width: 300px; padding: 16px; overflow-y: auto;
-      border-left: 1px solid #e5e7eb; background: #fff; font-size: 13px; color: #1a1a1a;
+      border-left: 1px solid #2a2a2a; background: #1b1b1b; font-size: 13px; color: #e5e7eb;
     }
     #panel h1 { font-size: 15px; margin: 0 0 14px; }
-    #panel h2 { font-size: 11px; text-transform: uppercase; color: #9ca3af; margin: 20px 0 8px; letter-spacing: .05em; }
+    #panel h2 { font-size: 11px; text-transform: uppercase; color: #6b7280; margin: 20px 0 8px; letter-spacing: .05em; }
     .check { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
-    .check input { margin: 0; width: 14px; height: 14px; }
+    .check input { margin: 0; width: 14px; height: 14px; accent-color: #e5e7eb; }
     .check label { margin: 0; cursor: pointer; }
     button {
       width: 100%; padding: 9px; margin-top: 8px; cursor: pointer;
-      border: 1px solid #d1d5db; border-radius: 6px; background: #fafafa; font-size: 13px;
+      border: 1px solid #3a3a3a; border-radius: 6px; background: #262626; color: #e5e7eb; font-size: 13px;
     }
-    button:hover { background: #f3f4f6; }
-    button.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
-    button.primary:hover { background: #000; }
+    button:hover { background: #303030; }
+    button.primary { background: #f5f5f5; color: #111; border-color: #f5f5f5; }
+    button.primary:hover { background: #e5e7eb; }
+    button:disabled { opacity: .45; cursor: default; }
     #file { display: none; }
-    #status { margin-top: 14px; color: #6b7280; font-size: 12px; min-height: 16px; }
-    .hint { color: #9ca3af; font-size: 11px; margin: 4px 0 0; }
+    #status { margin-top: 14px; color: #9ca3af; font-size: 12px; min-height: 16px; }
+    .hint { color: #6b7280; font-size: 11px; margin: 4px 0 0; }
   </style>
 </head>
 <body>

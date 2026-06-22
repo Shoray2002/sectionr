@@ -70,7 +70,7 @@ async function init() {
 	outputContainer = document.getElementById( 'output' );
 	const view = document.getElementById( 'view' );
 
-	const bgColor = 0xeeeeee;
+	const bgColor = 0x141414;
 
 	// renderer setup
 	renderer = new WebGPURenderer( { antialias: true } );
@@ -231,7 +231,7 @@ async function updateEdges() {
 	projection.material.dispose();
 	projection.geometry = visGeom;
 	projection.material.vertexColors = params.perObjectColors;
-	projection.material.color.set( params.perObjectColors ? 0xffffff : 0x030303 );
+	projection.material.color.set( params.perObjectColors ? 0xffffff : 0xf5f5f5 );
 
 	drawThroughProjection.geometry.dispose();
 	drawThroughProjection.material.dispose();
