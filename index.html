@@ -5,40 +5,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>sectionr — 3D → plotter SVG</title>
   <style>
-    :root { --fg: #1a1a1a; --muted: #6b7280; --line: #e5e7eb; }
-    html, body { margin: 0; padding: 0; overflow: hidden; background: #eee; }
-    body { font-family: ui-sans-serif, system-ui, sans-serif; }
-
-    /* status text the example writes into */
-    #output {
-      position: absolute; top: 14px; left: 16px; z-index: 1;
-      font-size: 12px; color: var(--muted); letter-spacing: .01em;
-      background: rgba(255,255,255,.7); backdrop-filter: blur(4px);
-      padding: 5px 10px; border-radius: 999px; border: 1px solid var(--line);
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    #app { display: flex; height: 100%; }
+    #view { flex: 1; position: relative; background: #eee; min-width: 0; }
+    #view canvas { display: block; }
+    #panel {
+      width: 300px; padding: 16px; overflow-y: auto;
+      border-left: 1px solid #e5e7eb; background: #fff; font-size: 13px; color: #1a1a1a;
     }
-
-    /* upload button (label wraps a hidden native input) */
-    #upload {
-      position: absolute; bottom: 16px; left: 16px; z-index: 2;
-      display: inline-flex; align-items: center; gap: 7px; cursor: pointer;
-      font-size: 13px; font-weight: 500; color: #fff; background: var(--fg);
-      padding: 9px 14px; border-radius: 8px; border: 1px solid var(--fg);
-      box-shadow: 0 1px 2px rgba(0,0,0,.12); user-select: none;
+    #panel h1 { font-size: 15px; margin: 0 0 14px; }
+    #panel h2 { font-size: 11px; text-transform: uppercase; color: #9ca3af; margin: 20px 0 8px; letter-spacing: .05em; }
+    .check { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
+    .check input { margin: 0; width: 14px; height: 14px; }
+    .check label { margin: 0; cursor: pointer; }
+    button {
+      width: 100%; padding: 9px; margin-top: 8px; cursor: pointer;
+      border: 1px solid #d1d5db; border-radius: 6px; background: #fafafa; font-size: 13px;
     }
-    #upload:hover { background: #000; }
-    #upload svg { width: 15px; height: 15px; }
+    button:hover { background: #f3f4f6; }
+    button.primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+    button.primary:hover { background: #000; }
     #file { display: none; }
+    #status { margin-top: 14px; color: #6b7280; font-size: 12px; min-height: 16px; }
+    .hint { color: #9ca3af; font-size: 11px; margin: 4px 0 0; }
   </style>
 </head>
 <body>
-  <div id="output"></div>
-  <label id="upload">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-    </svg>
-    Upload model
-    <input id="file" type="file" accept=".glb,.gltf,.obj,.stl,.stp,.step,.igs,.iges" />
-  </label>
+  <div id="app">
+    <div id="view"></div>
+    <div id="panel">
+      <h1>sectionr</h1>
+
+      <label for="file" class="primary" style="display:block;text-align:center;border-radius:6px;padding:9px;cursor:pointer;">Upload model</label>
+      <input id="file" type="file" accept=".glb,.gltf,.obj,.stl,.stp,.step,.igs,.iges" />
+      <p class="hint">GLB / GLTF / OBJ / STL · CAD: STEP / IGES</p>
+
+      <h2>Display</h2>
+      <div class="check"><input id="displayModel" type="checkbox" checked><label for="displayModel">Show 3D model</label></div>
+      <div class="check"><input id="displayDrawThroughProjection" type="checkbox"><label for="displayDrawThroughProjection">Show hidden edges</label></div>
+
+      <h2>Projection</h2>
+      <div class="check"><input id="includeIntersectionEdges" type="checkbox"><label for="includeIntersectionEdges">Include intersection edges</label></div>
+      <div class="check"><input id="visibilityCullMeshes" type="checkbox"><label for="visibilityCullMeshes">Visibility cull meshes</label></div>
+      <div class="check"><input id="perObjectColors" type="checkbox"><label for="perObjectColors">Per-object colors</label></div>
+      <button id="rotate">Random rotate</button>
+      <button id="regenerate" class="primary">Regenerate</button>
+
+      <div id="output"></div>
+    </div>
+  </div>
   <script type="module" src="/main.js"></script>
 </body>
 </html>

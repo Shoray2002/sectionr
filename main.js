@@ -15,7 +15,6 @@ import {
 	Vector3,
 	Float32BufferAttribute,
 } from 'three/webgpu';
-import { GUI } from 'three/examples/jsm/libs/lil-gui.module.min.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
@@ -39,6 +38,7 @@ const params = {
 	},
 	rotate: () => {
 
+		if ( ! model ) return;
 		group.quaternion.random();
 		group.position.set( 0, 0, 0 );
 		group.updateMatrixWorld( true );
@@ -55,7 +55,7 @@ const params = {
 };
 
 let needsRender = false;
-let renderer, camera, scene, gui, controls;
+let renderer, camera, scene, controls;
 let model, projection, drawThroughProjection, group;
 let outputContainer;
 let abortController;
@@ -67,16 +67,17 @@ document.getElementById( 'file' ).addEventListener( 'change', onUpload );
 async function init() {
 
 	outputContainer = document.getElementById( 'output' );
+	const view = document.getElementById( 'view' );
 
 	const bgColor = 0xeeeeee;
 
 	// renderer setup
 	renderer = new WebGPURenderer( { antialias: true } );
 	renderer.setPixelRatio( window.devicePixelRatio );
-	renderer.setSize( window.innerWidth, window.innerHeight );
+	renderer.setSize( view.clientWidth, view.clientHeight );
 	renderer.setClearColor( bgColor, 1 );
 	await renderer.init();
-	document.body.appendChild( renderer.domElement );
+	view.appendChild( renderer.domElement );
 
 	// scene setup
 	scene = new Scene();
@@ -89,21 +90,9 @@ async function init() {
 	const ambientLight = new AmbientLight( 0xb0bec5, 0.5 );
 	scene.add( ambientLight );
 
-	// load model
+	// model group — starts empty; populated on upload
 	group = new Group();
 	scene.add( group );
-
-	const gltf = await new GLTFLoader()
-		.setMeshoptDecoder( MeshoptDecoder )
-		.loadAsync( 'https://raw.githubusercontent.com/gkjohnson/3d-demo-data/main/models/nasa-m2020/Perseverance.glb' );
-	model = gltf.scene;
-
-	const box = new Box3();
-	box.setFromObject( model, true );
-	box.getCenter( group.position ).multiplyScalar( - 1 );
-	group.position.y = Math.max( 0, - box.min.y ) + 1;
-	group.add( model );
-	group.updateMatrixWorld( true );
 
 	// create projection display meshes
 	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { depthWrite: false } ) );
@@ -112,7 +101,7 @@ async function init() {
 	scene.add( projection, drawThroughProjection );
 
 	// camera setup
-	camera = new PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.01, 1e6 );
+	camera = new PerspectiveCamera( 75, view.clientWidth / view.clientHeight, 0.01, 1e6 );
 	camera.position.setScalar( 3.5 );
 	camera.updateProjectionMatrix();
 
@@ -126,28 +115,36 @@ async function init() {
 
 	} );
 
-	gui = new GUI();
-	const displayFolder = gui.addFolder( 'Display' );
-	displayFolder.add( params, 'displayModel' ).onChange( () => needsRender = true );
-	displayFolder.add( params, 'displayDrawThroughProjection' ).onChange( () => needsRender = true );
+	// panel controls bound to the same params object
+	const bind = ( id, onChange ) => {
 
-	const projectionFolder = gui.addFolder( 'Projection' );
-	projectionFolder.add( params, 'includeIntersectionEdges' );
-	projectionFolder.add( params, 'visibilityCullMeshes' );
-	projectionFolder.add( params, 'perObjectColors' );
-	projectionFolder.add( params, 'rotate' );
-	projectionFolder.add( params, 'regenerate' );
+		const el = document.getElementById( id );
+		el.checked = params[ id ];
+		el.addEventListener( 'change', () => {
+
+			params[ id ] = el.checked;
+			if ( onChange ) onChange();
+
+		} );
+
+	};
+
+	bind( 'displayModel', () => needsRender = true );
+	bind( 'displayDrawThroughProjection', () => needsRender = true );
+	bind( 'includeIntersectionEdges' );
+	bind( 'visibilityCullMeshes' );
+	bind( 'perObjectColors' );
+	document.getElementById( 'rotate' ).addEventListener( 'click', params.rotate );
+	document.getElementById( 'regenerate' ).addEventListener( 'click', params.regenerate );
 
 	render();
 
-	updateEdges();
-
 	window.addEventListener( 'resize', function () {
 
-		camera.aspect = window.innerWidth / window.innerHeight;
+		camera.aspect = view.clientWidth / view.clientHeight;
 		camera.updateProjectionMatrix();
 
-		renderer.setSize( window.innerWidth, window.innerHeight );
+		renderer.setSize( view.clientWidth, view.clientHeight );
 
 		needsRender = true;
 
@@ -156,6 +153,8 @@ async function init() {
 }
 
 async function updateEdges() {
+
+	if ( ! model ) return;
 
 	if ( abortController ) {
 
@@ -266,7 +265,7 @@ function render() {
 
 	requestAnimationFrame( render );
 
-	model.visible = params.displayModel;
+	if ( model ) model.visible = params.displayModel;
 	drawThroughProjection.visible = params.displayDrawThroughProjection;
 
 	if ( needsRender ) {
