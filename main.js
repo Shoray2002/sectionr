@@ -20,6 +20,8 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
+import { MeshoptSimplifier } from 'meshoptimizer';
 import { ProjectionGenerator, MeshVisibilityCuller } from 'three-edge-projection/webgpu';
 import { Color } from 'three';
 import occtimportjs from 'occt-import-js';
@@ -31,6 +33,8 @@ const params = {
 	includeIntersectionEdges: false,
 	visibilityCullMeshes: false,
 	perObjectColors: false,
+	angleThreshold: 50,
+	simplifyBudget: 200000,
 	regenerate: () => {
 
 		updateEdges();
@@ -135,6 +139,24 @@ async function init() {
 	bind( 'includeIntersectionEdges' );
 	bind( 'visibilityCullMeshes' );
 	bind( 'perObjectColors' );
+	const angleEl = document.getElementById( 'angleThreshold' );
+	angleEl.value = params.angleThreshold;
+	angleEl.addEventListener( 'input', () => {
+
+		params.angleThreshold = + angleEl.value;
+		document.getElementById( 'angleVal' ).textContent = angleEl.value;
+
+	} );
+
+	const simplifyEl = document.getElementById( 'simplify' );
+	simplifyEl.value = params.simplifyBudget / 1000;
+	simplifyEl.addEventListener( 'input', () => {
+
+		params.simplifyBudget = + simplifyEl.value * 1000;
+		document.getElementById( 'simplifyVal' ).textContent = simplifyEl.value;
+
+	} );
+
 	document.getElementById( 'rotate' ).addEventListener( 'click', params.rotate );
 	document.getElementById( 'regenerate' ).addEventListener( 'click', params.regenerate );
 	document.getElementById( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
@@ -180,6 +202,7 @@ async function updateEdges() {
 	const timeStart = window.performance.now();
 	const generator = new ProjectionGenerator( renderer );
 	generator.includeIntersectionEdges = params.includeIntersectionEdges;
+	generator.angleThreshold = params.angleThreshold;
 
 	// the generator reads each mesh's .visible flag for the occlusion pass, so the
 	// model must stay visible for the whole async generation — guard render() with this.
@@ -358,11 +381,66 @@ async function loadCAD( file, ext ) {
 		if ( m.attributes.normal ) geom.setAttribute( 'normal', new Float32BufferAttribute( m.attributes.normal.array, 3 ) );
 		geom.setIndex( m.index.array );
 		if ( ! m.attributes.normal ) geom.computeVertexNormals();
-		obj.add( new Mesh( geom, new MeshStandardMaterial( { color: 0xbfc4cc, flatShading: true } ) ) );
+		obj.add( new Mesh( geom, new MeshStandardMaterial( { color: 0xbfc4cc, flatShading: true, wireframe: true } ) ) );
 
 	}
 
 	return obj;
+
+}
+
+// Decimate meshes whose combined triangle count exceeds `budget` down to it.
+// meshopt is WASM — fast even on millions of tris. Output is plotter-scale identical.
+// Returns [ beforeTris, afterTris ].
+async function simplifyMeshes( obj, budget ) {
+
+	const meshes = [];
+	obj.traverse( o => {
+
+		if ( o.isMesh ) meshes.push( o );
+
+	} );
+
+	const triCount = m => ( m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count ) / 3;
+	const before = meshes.reduce( ( n, m ) => n + triCount( m ), 0 );
+	if ( before <= budget ) return [ before, before ];
+
+	await MeshoptSimplifier.ready;
+	const ratio = budget / before;
+
+	for ( const m of meshes ) {
+
+		// weld so meshopt sees shared edges (STL/OBJ soup is non-indexed)
+		const src = m.geometry.index ? m.geometry : mergeVertices( m.geometry );
+		const posAttr = src.attributes.position;
+
+		// tight, non-interleaved position copy — GLB attributes are often interleaved,
+		// which a raw .array + stride-3 read would corrupt
+		const verts = new Float32Array( posAttr.count * 3 );
+		for ( let i = 0; i < posAttr.count; i ++ ) {
+
+			verts[ i * 3 ] = posAttr.getX( i );
+			verts[ i * 3 + 1 ] = posAttr.getY( i );
+			verts[ i * 3 + 2 ] = posAttr.getZ( i );
+
+		}
+
+		const index = src.index ? new Uint32Array( src.index.array ) : new Uint32Array( posAttr.count ).map( ( _, i ) => i );
+		const target = Math.max( 3, Math.floor( index.length * ratio / 3 ) * 3 );
+
+		const [ simplified ] = MeshoptSimplifier.simplify( index, verts, 3, target, 1.0, [ 'LockBorder' ] );
+		if ( simplified.length < 3 || simplified.length >= index.length ) continue; // nothing gained — keep original
+
+		const geo = new BufferGeometry();
+		geo.setAttribute( 'position', new BufferAttribute( verts, 3 ) );
+		geo.setIndex( new BufferAttribute( new Uint32Array( simplified ), 1 ) );
+		geo.computeVertexNormals();
+		m.geometry = geo;
+
+	}
+
+	const after = meshes.reduce( ( n, m ) => n + triCount( m ), 0 );
+	return [ before, after ];
 
 }
 
@@ -408,6 +486,14 @@ async function onUpload( e ) {
 
 		}
 
+		// decimate before projection — the edge generator is O(triangles) on the CPU
+		const [ before, after ] = await simplifyMeshes( obj, params.simplifyBudget );
+		if ( after < before ) {
+
+			outputContainer.innerText = `Simplified ${ ( before / 1000 ).toFixed( 0 ) }k → ${ ( after / 1000 ).toFixed( 0 ) }k tris`;
+
+		}
+
 		// swap into the group using the same centering the example uses on load
 		group.remove( model );
 		model = obj;
@@ -422,10 +508,13 @@ async function onUpload( e ) {
 		group.add( model );
 		group.updateMatrixWorld( true );
 
-		// frame the camera to the new model's size
+		// frame the camera to the new model's size. near/far are scaled to the model so
+		// the depth-buffer ratio stays tight — a fixed near=0.01 on a large model wrecks
+		// depth precision and causes surface z-fighting in the preview.
 		const size = box.getSize( new Vector3() ).length() || 5;
 		camera.position.setScalar( size * 0.9 );
-		camera.far = Math.max( 1e3, size * 100 );
+		camera.near = size / 100;
+		camera.far = size * 50;
 		camera.updateProjectionMatrix();
 		controls.target.set( 0, 0, 0 );
 
