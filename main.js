@@ -25,6 +25,7 @@ import {
 	Vector3,
 	Quaternion,
 } from 'three';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -44,10 +45,14 @@ const params = {
 	visibilityCullMeshes: false,
 	decimate: false,
 	simplifyBudget: 200000,
+	visibleColor: '#111111',
+	hiddenColor: '#999999',
+	strokeWidth: 0.3, // pen width in mm
+	previewBg: '#f5f5f5',
 };
 
 let needsRender = false, previewNeedsRender = false;
-let renderer, camera, scene, group, model;
+let renderer, camera, scene, group, model, gizmo;
 let previewRenderer, previewCamera, previewScene, projection, drawThrough;
 let view, preview, outputContainer;
 
@@ -79,16 +84,23 @@ function init() {
 	camera = new PerspectiveCamera( 75, view.clientWidth / view.clientHeight, 0.01, 1e6 );
 	camera.position.set( 0, 0, 5 );
 
-	// --- projection preview (flat, top-down ortho) ---
+	// rotation gimbal — attaches to the model group; rings give precise per-axis
+	// orientation. Coexists with the arcball (arcball skips grabs on a gizmo ring).
+	gizmo = new TransformControls( camera, renderer.domElement );
+	gizmo.setMode( 'rotate' );
+	gizmo.addEventListener( 'change', () => needsRender = true );
+	scene.add( gizmo.getHelper() );
+
+	// --- projection preview (flat, top-down ortho — white = paper) ---
 	previewRenderer = new WebGLRenderer( { antialias: true } );
 	previewRenderer.setPixelRatio( window.devicePixelRatio );
 	previewRenderer.setSize( preview.clientWidth, preview.clientHeight );
-	previewRenderer.setClearColor( 0x0d0d0d, 1 );
+	previewRenderer.setClearColor( params.previewBg, 1 );
 	preview.appendChild( previewRenderer.domElement );
 
 	previewScene = new Scene();
-	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0xf5f5f5 } ) );
-	drawThrough = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0x6b7280 } ) );
+	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: params.visibleColor } ) );
+	drawThrough = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: params.hiddenColor } ) );
 	previewScene.add( projection, drawThrough );
 
 	previewCamera = new OrthographicCamera( - 1, 1, 1, - 1, 0.01, 1e7 );
@@ -137,6 +149,36 @@ function bindUI() {
 
 	} );
 
+	const bindColor = ( id, line ) => {
+
+		const el = document.getElementById( id );
+		el.value = params[ id ];
+		el.addEventListener( 'input', () => { params[ id ] = el.value; line.material.color.set( el.value ); previewNeedsRender = true; } );
+
+	};
+
+	bindColor( 'visibleColor', projection );
+	bindColor( 'hiddenColor', drawThrough );
+
+	const widthEl = document.getElementById( 'strokeWidth' );
+	widthEl.value = params.strokeWidth;
+	widthEl.addEventListener( 'input', () => {
+
+		params.strokeWidth = + widthEl.value;
+		document.getElementById( 'widthVal' ).textContent = params.strokeWidth.toFixed( 2 );
+
+	} );
+
+	const bgEl = document.getElementById( 'previewBg' );
+	bgEl.value = params.previewBg;
+	bgEl.addEventListener( 'change', () => {
+
+		params.previewBg = bgEl.value;
+		previewRenderer.setClearColor( params.previewBg, 1 );
+		previewNeedsRender = true;
+
+	} );
+
 	document.getElementById( 'open' ).addEventListener( 'click', openModel );
 	document.getElementById( 'reset' ).addEventListener( 'click', () => {
 
@@ -170,7 +212,7 @@ function attachArcball() {
 
 	el.addEventListener( 'pointerdown', ( e ) => {
 
-		if ( ! model ) return;
+		if ( ! model || gizmo.axis ) return; // gizmo.axis set => pointer is over a rotation ring
 		dragging = true;
 		startVec.copy( sphere( e ) );
 		baseQuat.copy( group.quaternion );
@@ -326,6 +368,7 @@ function setModel( geo ) {
 	model = new Mesh( geo, new MeshStandardMaterial( { color: 0xbfc4cc, flatShading: true } ) );
 	group.quaternion.identity();
 	group.add( model );
+	gizmo.attach( group );
 
 	// model is already centered server-side; frame the camera to its size
 	const size = new Box3().setFromObject( model ).getSize( new Vector3() ).length() || 5;
@@ -378,27 +421,21 @@ function resize() {
 
 }
 
-// --- SVG export (lines lie on XZ plane, y=0; flip z so top-down isn't mirrored) ---
-async function downloadSVG() {
+// accumulate the XZ-plane bounds of a line position attribute (z flipped so the
+// top-down print isn't mirrored). b = { minX, minY, maxX, maxY }.
+function accumulateBounds( p, b ) {
 
-	const p = projection.geometry.attributes.position;
-	if ( ! p || p.count === 0 ) return;
-
-	let minX = Infinity, minY = Infinity, maxX = - Infinity, maxY = - Infinity;
 	for ( let i = 0; i < p.count; i ++ ) {
 
 		const x = p.getX( i ), y = - p.getZ( i );
-		if ( x < minX ) minX = x; if ( y < minY ) minY = y;
-		if ( x > maxX ) maxX = x; if ( y > maxY ) maxY = y;
+		if ( x < b.minX ) b.minX = x; if ( y < b.minY ) b.minY = y;
+		if ( x > b.maxX ) b.maxX = x; if ( y > b.maxY ) b.maxY = y;
 
 	}
 
-	const w = maxX - minX, h = maxY - minY;
-	if ( ! isFinite( w ) || w <= 0 || h <= 0 ) return;
+}
 
-	const mm = 300 / Math.max( w, h );
-	const stroke = Math.max( w, h ) / 800;
-	const minLen2 = ( Math.max( w, h ) * 1e-4 ) ** 2;
+function pathData( p, minX, minY, minLen2 ) {
 
 	let d = '';
 	for ( let i = 0; i < p.count; i += 2 ) {
@@ -410,8 +447,34 @@ async function downloadSVG() {
 
 	}
 
+	return d;
+
+}
+
+// --- SVG export (lines lie on XZ plane, y=0; flip z so top-down isn't mirrored) ---
+async function downloadSVG() {
+
+	const vis = projection.geometry.attributes.position;
+	if ( ! vis || vis.count === 0 ) return;
+	const hid = drawThrough.geometry.attributes.position;
+	const exportHidden = params.displayDrawThroughProjection && hid && hid.count > 0;
+
+	const b = { minX: Infinity, minY: Infinity, maxX: - Infinity, maxY: - Infinity };
+	accumulateBounds( vis, b );
+	if ( exportHidden ) accumulateBounds( hid, b );
+
+	const w = b.maxX - b.minX, h = b.maxY - b.minY;
+	if ( ! isFinite( w ) || w <= 0 || h <= 0 ) return;
+
+	const mm = 300 / Math.max( w, h );        // model units -> mm on paper
+	const stroke = params.strokeWidth / mm;    // pen width (mm) -> viewBox units
+	const minLen2 = ( Math.max( w, h ) * 1e-4 ) ** 2;
+
+	const visPath = `<path d="${ pathData( vis, b.minX, b.minY, minLen2 ) }" fill="none" stroke="${ params.visibleColor }" stroke-width="${ stroke.toFixed( 5 ) }" stroke-linecap="butt"/>`;
+	const hidPath = exportHidden ? `\n  <path d="${ pathData( hid, b.minX, b.minY, minLen2 ) }" fill="none" stroke="${ params.hiddenColor }" stroke-width="${ stroke.toFixed( 5 ) }" stroke-linecap="butt"/>` : '';
+
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${ ( w * mm ).toFixed( 2 ) }mm" height="${ ( h * mm ).toFixed( 2 ) }mm" viewBox="0 0 ${ w.toFixed( 4 ) } ${ h.toFixed( 4 ) }">
-  <path d="${ d }" fill="none" stroke="#000" stroke-width="${ stroke.toFixed( 5 ) }" stroke-linecap="butt"/>
+  ${ visPath }${ hidPath }
 </svg>`;
 
 	// WKWebView ignores <a download> blob saves — use Tauri's native save dialog + write.
