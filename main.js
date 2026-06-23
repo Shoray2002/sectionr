@@ -106,6 +106,16 @@ function init() {
 	previewCamera = new OrthographicCamera( - 1, 1, 1, - 1, 0.01, 1e7 );
 	previewCamera.up.set( 0, 0, - 1 ); // world -Z is "up" in the print, matching the SVG y = -z
 
+	// zoom the projection preview with the wheel
+	previewRenderer.domElement.addEventListener( 'wheel', ( e ) => {
+
+		e.preventDefault();
+		previewCamera.zoom = Math.max( 0.2, previewCamera.zoom * ( 1 - e.deltaY * 0.001 ) );
+		previewCamera.updateProjectionMatrix();
+		previewNeedsRender = true;
+
+	}, { passive: false } );
+
 	bindUI();
 	attachArcball();
 
@@ -404,6 +414,7 @@ function framePreview() {
 
 	previewCamera.left = - halfW; previewCamera.right = halfW;
 	previewCamera.top = halfH; previewCamera.bottom = - halfH;
+	previewCamera.zoom = 1; // a fresh fit resets any wheel zoom
 	previewCamera.position.set( cx, Math.max( w, h ) * 2 + 10, cz );
 	previewCamera.lookAt( cx, 0, cz );
 	previewCamera.updateProjectionMatrix();
