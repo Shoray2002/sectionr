@@ -8,8 +8,11 @@
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; background: #141414; color: #e5e7eb; }
     #app { display: flex; height: 100%; }
-    #view { flex: 1; position: relative; background: #141414; min-width: 0; }
-    #view canvas { display: block; }
+    #view { flex: 1; position: relative; background: #141414; min-width: 0; cursor: grab; }
+    #view:active { cursor: grabbing; }
+    #preview { flex: 1; position: relative; background: #0d0d0d; min-width: 0; border-left: 1px solid #2a2a2a; }
+    #view canvas, #preview canvas { display: block; }
+    .tag { position: absolute; top: 8px; left: 10px; font-size: 11px; color: #6b7280; pointer-events: none; }
     #panel {
       width: 300px; padding: 16px; overflow-y: auto;
       border-left: 1px solid #2a2a2a; background: #1b1b1b; font-size: 13px; color: #e5e7eb;
@@ -34,7 +37,8 @@
 </head>
 <body>
   <div id="app">
-    <div id="view"></div>
+    <div id="view"><div class="tag">drag to position · scroll to zoom</div></div>
+    <div id="preview"><div class="tag">projection preview</div></div>
     <div id="panel">
       <h1>sectionr</h1>
 
@@ -52,7 +56,7 @@
         <input id="angleThreshold" type="range" min="1" max="90" value="50" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
       </div>
       <p class="hint">Higher = fewer edges on dense surfaces.</p>
-      <button id="rotate">Random rotate</button>
+      <button id="reset">Reset orientation</button>
       <button id="regenerate" class="primary">Generate projection</button>
 
       <h2>Export</h2>

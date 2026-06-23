@@ -5,6 +5,11 @@ use tauri::{Manager, RunEvent};
 // Holds the Deno compute sidecar so we can kill it when the app exits.
 struct Sidecar(Mutex<Option<Child>>);
 
+#[tauri::command]
+fn save_svg(path: String, content: String) -> Result<(), String> {
+    std::fs::write(&path, content).map_err(|e| e.to_string())
+}
+
 fn spawn_sidecar() -> std::io::Result<Child> {
     // project root = parent of src-tauri (dev). server/main.js + deno.json live here.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -29,6 +34,7 @@ fn spawn_sidecar() -> std::io::Result<Child> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![save_svg])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

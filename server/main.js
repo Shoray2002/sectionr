@@ -21,7 +21,10 @@ import { mergeVertices, mergeGeometries } from "../node_modules/three/examples/j
 import { MeshoptSimplifier } from "meshoptimizer";
 
 // three starts an internal rAF loop on init(); Deno has no rAF / DOM. Stub them.
-globalThis.requestAnimationFrame ??= (cb) => setTimeout(() => cb(performance.now()), 16);
+// Fire ASAP (not at 16ms): the projection's nextFrame() yields between every compute
+// job, and the browser is vsync-capped to 16ms per yield — firing immediately here
+// makes the headless run *faster* than the browser, esp. on big multi-batch models.
+globalThis.requestAnimationFrame ??= (cb) => setTimeout(() => cb(performance.now()), 0);
 globalThis.cancelAnimationFrame ??= (id) => clearTimeout(id);
 
 const PROXY_BUDGET = 200_000; // display proxy triangle budget
@@ -120,6 +123,7 @@ async function project(quat, { angleThreshold = 50, includeIntersectionEdges = f
   const gen = new ProjectionGenerator(renderer);
   gen.includeIntersectionEdges = includeIntersectionEdges;
   gen.angleThreshold = angleThreshold;
+  gen.batchSize = 1_000_000; // fewer GPU jobs/readbacks than the 100k default
 
   const result = await gen.generate(fullRes, { onProgress: () => {} });
   return {

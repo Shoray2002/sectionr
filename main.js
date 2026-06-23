@@ -1,10 +1,16 @@
 // sectionr frontend — display only. All heavy lifting (loading full-res models,
 // decimation, edge projection) runs in the Deno sidecar; this just shows a proxy
-// for orientation and renders the line segments the sidecar returns.
+// to position, and previews the projected line segments the sidecar returns.
+//
+// Two panes: left = 3D positioning (drag rotates the MODEL, camera is fixed —
+// no orbit). Right = flat projection preview, looking straight down the print
+// plane. The projection is taken from the left view's camera plane, so what you
+// compose is what you get.
 import {
 	Scene,
 	WebGLRenderer,
 	PerspectiveCamera,
+	OrthographicCamera,
 	Group,
 	Mesh,
 	MeshStandardMaterial,
@@ -17,11 +23,18 @@ import {
 	AmbientLight,
 	Box3,
 	Vector3,
+	Quaternion,
 } from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 
 const API = 'http://127.0.0.1:8787';
+
+// Maps the camera's view frame into the sidecar's "project down world +Y onto
+// XZ" frame: view depth (Z) -> world Y (projection axis), view up (Y) -> world
+// -Z. With the SVG export / preview flipping Z back, the print matches the view.
+// ponytail: if visible & hidden edges come out swapped, negate this angle.
+const PROJ_SWAP = new Quaternion().setFromAxisAngle( new Vector3( 1, 0, 0 ), - Math.PI / 2 );
 
 const params = {
 	displayModel: true,
@@ -30,47 +43,64 @@ const params = {
 	angleThreshold: 50,
 };
 
-let needsRender = false;
-let renderer, camera, scene, controls, group, model, projection, drawThrough;
-let outputContainer;
+let needsRender = false, previewNeedsRender = false;
+let renderer, camera, scene, group, model;
+let previewRenderer, previewCamera, previewScene, projection, drawThrough;
+let view, preview, outputContainer;
 
 init();
 
-async function init() {
+function init() {
 
 	outputContainer = document.getElementById( 'output' );
-	const view = document.getElementById( 'view' );
-	const bgColor = 0x141414;
+	view = document.getElementById( 'view' );
+	preview = document.getElementById( 'preview' );
 
+	// --- positioning view (3D) ---
 	renderer = new WebGLRenderer( { antialias: true } );
 	renderer.setPixelRatio( window.devicePixelRatio );
 	renderer.setSize( view.clientWidth, view.clientHeight );
-	renderer.setClearColor( bgColor, 1 );
+	renderer.setClearColor( 0x141414, 1 );
 	view.appendChild( renderer.domElement );
 
 	scene = new Scene();
-
 	const light = new DirectionalLight( 0xffffff, 3.5 );
 	light.position.set( 1, 2, 3 );
-	scene.add( light );
-	scene.add( new AmbientLight( 0xb0bec5, 0.5 ) );
+	scene.add( light, new AmbientLight( 0xb0bec5, 0.5 ) );
 
 	group = new Group();
 	scene.add( group );
 
-	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0xf5f5f5, depthWrite: false } ) );
-	drawThrough = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0xcacaca, depthWrite: false } ) );
-	drawThrough.renderOrder = - 1;
-	scene.add( projection, drawThrough );
-
+	// camera fixed on +Z looking down -Z (identity orientation) — keeps the
+	// arcball axes aligned with screen axes and the projection math trivial.
 	camera = new PerspectiveCamera( 75, view.clientWidth / view.clientHeight, 0.01, 1e6 );
-	camera.position.setScalar( 3.5 );
-	camera.updateProjectionMatrix();
+	camera.position.set( 0, 0, 5 );
 
-	controls = new OrbitControls( camera, renderer.domElement );
-	controls.addEventListener( 'change', () => needsRender = true );
+	// --- projection preview (flat, top-down ortho) ---
+	previewRenderer = new WebGLRenderer( { antialias: true } );
+	previewRenderer.setPixelRatio( window.devicePixelRatio );
+	previewRenderer.setSize( preview.clientWidth, preview.clientHeight );
+	previewRenderer.setClearColor( 0x0d0d0d, 1 );
+	preview.appendChild( previewRenderer.domElement );
 
-	// UI
+	previewScene = new Scene();
+	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0xf5f5f5 } ) );
+	drawThrough = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0x6b7280 } ) );
+	previewScene.add( projection, drawThrough );
+
+	previewCamera = new OrthographicCamera( - 1, 1, 1, - 1, 0.01, 1e7 );
+	previewCamera.up.set( 0, 0, - 1 ); // world -Z is "up" in the print, matching the SVG y = -z
+
+	bindUI();
+	attachArcball();
+
+	window.addEventListener( 'resize', resize );
+	render();
+
+}
+
+function bindUI() {
+
 	const bindCheck = ( id, onChange ) => {
 
 		const el = document.getElementById( id );
@@ -80,7 +110,7 @@ async function init() {
 	};
 
 	bindCheck( 'displayModel', () => needsRender = true );
-	bindCheck( 'displayDrawThroughProjection', () => needsRender = true );
+	bindCheck( 'displayDrawThroughProjection', () => previewNeedsRender = true );
 	bindCheck( 'includeIntersectionEdges' );
 
 	const angleEl = document.getElementById( 'angleThreshold' );
@@ -93,26 +123,74 @@ async function init() {
 	} );
 
 	document.getElementById( 'open' ).addEventListener( 'click', openModel );
-	document.getElementById( 'rotate' ).addEventListener( 'click', () => {
+	document.getElementById( 'reset' ).addEventListener( 'click', () => {
 
 		if ( ! model ) return;
-		group.quaternion.random();
+		group.quaternion.identity();
 		needsRender = true;
 
 	} );
 	document.getElementById( 'regenerate' ).addEventListener( 'click', generate );
 	document.getElementById( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
 
-	window.addEventListener( 'resize', () => {
+}
 
-		camera.aspect = view.clientWidth / view.clientHeight;
-		camera.updateProjectionMatrix();
-		renderer.setSize( view.clientWidth, view.clientHeight );
+// --- arcball: drag rotates the model, camera stays put ----------------------
+
+function attachArcball() {
+
+	const el = renderer.domElement;
+	let dragging = false;
+	const startVec = new Vector3(), baseQuat = new Quaternion(), dq = new Quaternion();
+
+	const sphere = ( e ) => {
+
+		const r = el.getBoundingClientRect();
+		const x = ( ( e.clientX - r.left ) / r.width ) * 2 - 1;
+		const y = - ( ( ( e.clientY - r.top ) / r.height ) * 2 - 1 );
+		const l2 = x * x + y * y;
+		return new Vector3( x, y, l2 <= 1 ? Math.sqrt( 1 - l2 ) : 0 ).normalize();
+
+	};
+
+	el.addEventListener( 'pointerdown', ( e ) => {
+
+		if ( ! model ) return;
+		dragging = true;
+		startVec.copy( sphere( e ) );
+		baseQuat.copy( group.quaternion );
+		el.setPointerCapture( e.pointerId );
+
+	} );
+	el.addEventListener( 'pointermove', ( e ) => {
+
+		if ( ! dragging ) return;
+		dq.setFromUnitVectors( startVec, sphere( e ) );
+		group.quaternion.copy( dq ).multiply( baseQuat );
 		needsRender = true;
 
 	} );
+	const stop = () => dragging = false;
+	el.addEventListener( 'pointerup', stop );
+	el.addEventListener( 'pointercancel', stop );
 
-	render();
+	el.addEventListener( 'wheel', ( e ) => {
+
+		e.preventDefault();
+		camera.position.z = Math.max( 0.05, camera.position.z * ( 1 + e.deltaY * 0.001 ) );
+		needsRender = true;
+
+	}, { passive: false } );
+
+}
+
+// orientation to send the sidecar: the model as the camera sees it, remapped
+// into the projection frame. camera is fixed, but read live so this still holds
+// if the camera ever moves.
+function viewportQuaternion() {
+
+	const camInv = camera.quaternion.clone().invert();
+	return PROJ_SWAP.clone().multiply( camInv ).multiply( group.quaternion );
 
 }
 
@@ -140,8 +218,8 @@ async function openModel() {
 
 	const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
 	setModel( decodeProxy( await res.arrayBuffer() ) );
-	outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — generating…`;
-	generate();
+	document.getElementById( 'downloadSVG' ).disabled = true;
+	outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — position, then Generate projection`;
 
 }
 
@@ -153,7 +231,7 @@ async function generate() {
 	btn.disabled = true;
 	outputContainer.innerText = 'Projecting…';
 
-	const q = group.quaternion;
+	const q = viewportQuaternion();
 	try {
 
 		const res = await fetch( `${ API }/project`, {
@@ -171,6 +249,7 @@ async function generate() {
 		const { vis, hid } = decodeProject( await res.arrayBuffer() );
 		setLines( projection, vis );
 		setLines( drawThrough, hid );
+		framePreview();
 		document.getElementById( 'downloadSVG' ).disabled = vis.length === 0;
 		outputContainer.innerText = `${ vis.length / 6 | 0 } visible + ${ hid.length / 6 | 0 } hidden segments`;
 
@@ -181,7 +260,6 @@ async function generate() {
 	} finally {
 
 		btn.disabled = false;
-		needsRender = true;
 
 	}
 
@@ -234,17 +312,57 @@ function setModel( geo ) {
 
 	// model is already centered server-side; frame the camera to its size
 	const size = new Box3().setFromObject( model ).getSize( new Vector3() ).length() || 5;
-	camera.position.setScalar( size * 0.9 );
+	camera.position.set( 0, 0, size * 0.9 );
 	camera.near = size / 100;
 	camera.far = size * 50;
 	camera.updateProjectionMatrix();
-	controls.target.set( 0, 0, 0 );
+	needsRender = true;
+
+}
+
+// fit the ortho preview camera to the projected line bounds (in the XZ print plane)
+function framePreview() {
+
+	const p = projection.geometry.attributes.position;
+	previewNeedsRender = true;
+	if ( ! p || p.count === 0 ) return;
+
+	let minX = Infinity, minZ = Infinity, maxX = - Infinity, maxZ = - Infinity;
+	for ( let i = 0; i < p.count; i ++ ) {
+
+		const x = p.getX( i ), z = p.getZ( i );
+		if ( x < minX ) minX = x; if ( z < minZ ) minZ = z;
+		if ( x > maxX ) maxX = x; if ( z > maxZ ) maxZ = z;
+
+	}
+
+	const cx = ( minX + maxX ) / 2, cz = ( minZ + maxZ ) / 2;
+	const w = ( maxX - minX ) || 1, h = ( maxZ - minZ ) || 1;
+	const aspect = previewRenderer.domElement.clientWidth / previewRenderer.domElement.clientHeight || 1;
+	let halfW = w / 2 * 1.1, halfH = h / 2 * 1.1;
+	if ( halfW / halfH < aspect ) halfW = halfH * aspect; else halfH = halfW / aspect;
+
+	previewCamera.left = - halfW; previewCamera.right = halfW;
+	previewCamera.top = halfH; previewCamera.bottom = - halfH;
+	previewCamera.position.set( cx, Math.max( w, h ) * 2 + 10, cz );
+	previewCamera.lookAt( cx, 0, cz );
+	previewCamera.updateProjectionMatrix();
+
+}
+
+function resize() {
+
+	camera.aspect = view.clientWidth / view.clientHeight;
+	camera.updateProjectionMatrix();
+	renderer.setSize( view.clientWidth, view.clientHeight );
+	previewRenderer.setSize( preview.clientWidth, preview.clientHeight );
+	framePreview();
 	needsRender = true;
 
 }
 
 // --- SVG export (lines lie on XZ plane, y=0; flip z so top-down isn't mirrored) ---
-function downloadSVG() {
+async function downloadSVG() {
 
 	const p = projection.geometry.attributes.position;
 	if ( ! p || p.count === 0 ) return;
@@ -279,19 +397,30 @@ function downloadSVG() {
   <path d="${ d }" fill="none" stroke="#000" stroke-width="${ stroke.toFixed( 5 ) }" stroke-linecap="butt"/>
 </svg>`;
 
-	const a = document.createElement( 'a' );
-	a.href = URL.createObjectURL( new Blob( [ svg ], { type: 'image/svg+xml' } ) );
-	a.download = 'projection.svg';
-	a.click();
-	URL.revokeObjectURL( a.href );
+	// WKWebView ignores <a download> blob saves — use Tauri's native save dialog + write.
+	const path = await save( { defaultPath: 'projection.svg', filters: [ { name: 'SVG', extensions: [ 'svg' ] } ] } );
+	if ( ! path ) return;
+	try {
+
+		await invoke( 'save_svg', { path, content: svg } );
+		outputContainer.innerText = `Saved ${ path }`;
+
+	} catch ( e ) {
+
+		outputContainer.innerText = `Save failed: ${ e }`;
+
+	}
 
 }
 
 function render() {
 
 	requestAnimationFrame( render );
+
 	if ( model ) model.visible = params.displayModel;
-	drawThrough.visible = params.displayDrawThroughProjection;
 	if ( needsRender ) { renderer.render( scene, camera ); needsRender = false; }
+
+	drawThrough.visible = params.displayDrawThroughProjection;
+	if ( previewNeedsRender ) { previewRenderer.render( previewScene, previewCamera ); previewNeedsRender = false; }
 
 }
