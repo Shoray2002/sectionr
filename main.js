@@ -1,144 +1,88 @@
+// sectionr frontend — display only. All heavy lifting (loading full-res models,
+// decimation, edge projection) runs in the Deno sidecar; this just shows a proxy
+// for orientation and renders the line segments the sidecar returns.
 import {
-	Box3,
 	Scene,
-	DirectionalLight,
-	AmbientLight,
-	Group,
-	BufferGeometry,
-	BufferAttribute,
-	LineSegments,
-	LineBasicMaterial,
+	WebGLRenderer,
 	PerspectiveCamera,
-	WebGPURenderer,
+	Group,
 	Mesh,
 	MeshStandardMaterial,
-	Vector3,
+	BufferGeometry,
+	BufferAttribute,
 	Float32BufferAttribute,
-} from 'three/webgpu';
+	LineSegments,
+	LineBasicMaterial,
+	DirectionalLight,
+	AmbientLight,
+	Box3,
+	Vector3,
+} from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
-import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
-import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
-import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { MeshoptSimplifier } from 'meshoptimizer';
-import { ProjectionGenerator, MeshVisibilityCuller } from 'three-edge-projection/webgpu';
-import { Color } from 'three';
-import occtimportjs from 'occt-import-js';
-import wasmUrl from 'occt-import-js/dist/occt-import-js.wasm?url';
+import { open } from '@tauri-apps/plugin-dialog';
+
+const API = 'http://127.0.0.1:8787';
 
 const params = {
 	displayModel: true,
 	displayDrawThroughProjection: false,
 	includeIntersectionEdges: false,
-	visibilityCullMeshes: false,
-	perObjectColors: false,
 	angleThreshold: 50,
-	simplifyBudget: 200000,
-	regenerate: () => {
-
-		updateEdges();
-
-	},
-	rotate: () => {
-
-		if ( ! model ) return;
-		group.quaternion.random();
-		group.position.set( 0, 0, 0 );
-		group.updateMatrixWorld( true );
-
-		const box = new Box3();
-		box.setFromObject( model, true );
-		box.getCenter( group.position ).multiplyScalar( - 1 );
-		group.position.y = Math.max( 0, - box.min.y ) + 1;
-		group.updateMatrixWorld( true );
-
-		needsRender = true;
-
-	},
 };
 
 let needsRender = false;
-let renderer, camera, scene, controls;
-let model, projection, drawThroughProjection, group;
+let renderer, camera, scene, controls, group, model, projection, drawThrough;
 let outputContainer;
-let abortController;
-let generating = false;
 
 init();
-
-document.getElementById( 'file' ).addEventListener( 'change', onUpload );
 
 async function init() {
 
 	outputContainer = document.getElementById( 'output' );
 	const view = document.getElementById( 'view' );
-
 	const bgColor = 0x141414;
 
-	// renderer setup
-	renderer = new WebGPURenderer( { antialias: true } );
+	renderer = new WebGLRenderer( { antialias: true } );
 	renderer.setPixelRatio( window.devicePixelRatio );
 	renderer.setSize( view.clientWidth, view.clientHeight );
 	renderer.setClearColor( bgColor, 1 );
-	await renderer.init();
 	view.appendChild( renderer.domElement );
 
-	// scene setup
 	scene = new Scene();
 
-	// lights
 	const light = new DirectionalLight( 0xffffff, 3.5 );
 	light.position.set( 1, 2, 3 );
 	scene.add( light );
+	scene.add( new AmbientLight( 0xb0bec5, 0.5 ) );
 
-	const ambientLight = new AmbientLight( 0xb0bec5, 0.5 );
-	scene.add( ambientLight );
-
-	// model group — starts empty; populated on upload
 	group = new Group();
 	scene.add( group );
 
-	// create projection display meshes
-	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { depthWrite: false } ) );
-	drawThroughProjection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { depthWrite: false } ) );
-	drawThroughProjection.renderOrder = - 1;
-	scene.add( projection, drawThroughProjection );
+	projection = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0xf5f5f5, depthWrite: false } ) );
+	drawThrough = new LineSegments( new BufferGeometry(), new LineBasicMaterial( { color: 0xcacaca, depthWrite: false } ) );
+	drawThrough.renderOrder = - 1;
+	scene.add( projection, drawThrough );
 
-	// camera setup
 	camera = new PerspectiveCamera( 75, view.clientWidth / view.clientHeight, 0.01, 1e6 );
 	camera.position.setScalar( 3.5 );
 	camera.updateProjectionMatrix();
 
-	needsRender = true;
-
-	// controls
 	controls = new OrbitControls( camera, renderer.domElement );
-	controls.addEventListener( 'change', () => {
+	controls.addEventListener( 'change', () => needsRender = true );
 
-		needsRender = true;
-
-	} );
-
-	// panel controls bound to the same params object
-	const bind = ( id, onChange ) => {
+	// UI
+	const bindCheck = ( id, onChange ) => {
 
 		const el = document.getElementById( id );
 		el.checked = params[ id ];
-		el.addEventListener( 'change', () => {
-
-			params[ id ] = el.checked;
-			if ( onChange ) onChange();
-
-		} );
+		el.addEventListener( 'change', () => { params[ id ] = el.checked; if ( onChange ) onChange(); } );
 
 	};
 
-	bind( 'displayModel', () => needsRender = true );
-	bind( 'displayDrawThroughProjection', () => needsRender = true );
-	bind( 'includeIntersectionEdges' );
-	bind( 'visibilityCullMeshes' );
-	bind( 'perObjectColors' );
+	bindCheck( 'displayModel', () => needsRender = true );
+	bindCheck( 'displayDrawThroughProjection', () => needsRender = true );
+	bindCheck( 'includeIntersectionEdges' );
+
 	const angleEl = document.getElementById( 'angleThreshold' );
 	angleEl.value = params.angleThreshold;
 	angleEl.addEventListener( 'input', () => {
@@ -148,132 +92,158 @@ async function init() {
 
 	} );
 
-	const simplifyEl = document.getElementById( 'simplify' );
-	simplifyEl.value = params.simplifyBudget / 1000;
-	simplifyEl.addEventListener( 'input', () => {
+	document.getElementById( 'open' ).addEventListener( 'click', openModel );
+	document.getElementById( 'rotate' ).addEventListener( 'click', () => {
 
-		params.simplifyBudget = + simplifyEl.value * 1000;
-		document.getElementById( 'simplifyVal' ).textContent = simplifyEl.value;
+		if ( ! model ) return;
+		group.quaternion.random();
+		needsRender = true;
 
 	} );
-
-	document.getElementById( 'rotate' ).addEventListener( 'click', params.rotate );
-	document.getElementById( 'regenerate' ).addEventListener( 'click', params.regenerate );
+	document.getElementById( 'regenerate' ).addEventListener( 'click', generate );
 	document.getElementById( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
 
-	render();
-
-	window.addEventListener( 'resize', function () {
+	window.addEventListener( 'resize', () => {
 
 		camera.aspect = view.clientWidth / view.clientHeight;
 		camera.updateProjectionMatrix();
-
 		renderer.setSize( view.clientWidth, view.clientHeight );
-
 		needsRender = true;
 
-	}, false );
+	} );
+
+	render();
 
 }
 
-async function updateEdges() {
+// --- sidecar client --------------------------------------------------------
 
-	if ( ! model ) return;
+async function openModel() {
 
-	if ( abortController ) {
+	const path = await open( { multiple: false, filters: [ { name: '3D model', extensions: [ 'glb', 'gltf', 'stl', 'obj' ] } ] } );
+	if ( ! path ) return;
 
-		abortController.abort();
-
-	}
-
-	const myController = new AbortController();
-	abortController = myController;
-
-	projection.geometry.dispose();
-	projection.material.dispose();
-	projection.geometry = new BufferGeometry();
-
-	drawThroughProjection.geometry.dispose();
-	drawThroughProjection.material.dispose();
-	drawThroughProjection.geometry = new BufferGeometry();
-
-	needsRender = true;
-
-	const timeStart = window.performance.now();
-	const generator = new ProjectionGenerator( renderer );
-	generator.includeIntersectionEdges = params.includeIntersectionEdges;
-	generator.angleThreshold = params.angleThreshold;
-
-	// the generator reads each mesh's .visible flag for the occlusion pass, so the
-	// model must stay visible for the whole async generation — guard render() with this.
-	model.visible = true;
-	generating = true;
-	let input = [ model ];
-	if ( params.visibilityCullMeshes ) {
-
-		input = await new MeshVisibilityCuller( renderer, { pixelsPerMeter: 0.1 } ).cull( input );
-
-	}
-
-	let result;
+	outputContainer.innerText = 'Loading…';
+	let res;
 	try {
 
-		result = await generator.generate( input, {
-			signal: myController.signal,
-			onProgress: ( p, msg ) => {
+		res = await fetch( `${ API }/load`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { path } ) } );
 
-				outputContainer.innerText = `${ msg }... ${ ( p * 100 ).toFixed( 2 ) }%`;
+	} catch ( e ) {
 
-			},
-		} );
-
-	} catch {
-
-		// aborted by a newer call, or failed — only reset if we're still the active run
-		if ( abortController === myController ) {
-
-			generating = false;
-			model.visible = params.displayModel;
-
-		}
-
+		outputContainer.innerText = `Sidecar unreachable — is it running? (${ e.message })`;
 		return;
 
 	}
 
-	const visGeom = result.visibleEdges.getLineGeometry();
-	const hidGeom = result.hiddenEdges.getLineGeometry();
-	if ( params.perObjectColors ) {
+	if ( ! res.ok ) { outputContainer.innerText = `Load failed: ${ await res.text() }`; return; }
 
-		applyPerObjectColors( result.visibleEdges, visGeom );
-		applyPerObjectColors( result.hiddenEdges, hidGeom, 0.8 );
+	const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
+	setModel( decodeProxy( await res.arrayBuffer() ) );
+	outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — generating…`;
+	generate();
+
+}
+
+async function generate() {
+
+	if ( ! model ) return;
+
+	const btn = document.getElementById( 'regenerate' );
+	btn.disabled = true;
+	outputContainer.innerText = 'Projecting…';
+
+	const q = group.quaternion;
+	try {
+
+		const res = await fetch( `${ API }/project`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify( {
+				quaternion: [ q.x, q.y, q.z, q.w ],
+				angleThreshold: params.angleThreshold,
+				includeIntersectionEdges: params.includeIntersectionEdges,
+			} ),
+		} );
+
+		if ( ! res.ok ) { outputContainer.innerText = `Projection failed: ${ await res.text() }`; return; }
+
+		const { vis, hid } = decodeProject( await res.arrayBuffer() );
+		setLines( projection, vis );
+		setLines( drawThrough, hid );
+		document.getElementById( 'downloadSVG' ).disabled = vis.length === 0;
+		outputContainer.innerText = `${ vis.length / 6 | 0 } visible + ${ hid.length / 6 | 0 } hidden segments`;
+
+	} catch ( e ) {
+
+		outputContainer.innerText = `Projection error: ${ e.message }`;
+
+	} finally {
+
+		btn.disabled = false;
+		needsRender = true;
 
 	}
 
-	projection.geometry.dispose();
-	projection.material.dispose();
-	projection.geometry = visGeom;
-	projection.material.vertexColors = params.perObjectColors;
-	projection.material.color.set( params.perObjectColors ? 0xffffff : 0xf5f5f5 );
+}
 
-	drawThroughProjection.geometry.dispose();
-	drawThroughProjection.material.dispose();
-	drawThroughProjection.geometry = hidGeom;
-	drawThroughProjection.material.vertexColors = params.perObjectColors;
-	drawThroughProjection.material.color.set( params.perObjectColors ? 0xffffff : 0xcacaca );
+// proxy: [u32 vertCount][u32 indexCount][f32 positions][u32 index]
+function decodeProxy( buf ) {
 
-	const elapsed = window.performance.now() - timeStart;
-	outputContainer.innerText = `Generation time: ${ elapsed.toFixed( 2 ) }ms`;
+	const dv = new DataView( buf );
+	const vertCount = dv.getUint32( 0, true );
+	const indexCount = dv.getUint32( 4, true );
+	const pos = new Float32Array( buf, 8, vertCount * 3 ).slice();
+	const idx = new Uint32Array( buf, 8 + vertCount * 12, indexCount ).slice();
+	const g = new BufferGeometry();
+	g.setAttribute( 'position', new BufferAttribute( pos, 3 ) );
+	g.setIndex( new BufferAttribute( idx, 1 ) );
+	g.computeVertexNormals();
+	return g;
 
-	generating = false;
-	model.visible = params.displayModel;
-	document.getElementById( 'downloadSVG' ).disabled = false;
+}
+
+// project: [u32 visFloats][u32 hidFloats][f32 vis][f32 hid]
+function decodeProject( buf ) {
+
+	const dv = new DataView( buf );
+	const visLen = dv.getUint32( 0, true );
+	const hidLen = dv.getUint32( 4, true );
+	return {
+		vis: new Float32Array( buf, 8, visLen ).slice(),
+		hid: new Float32Array( buf, 8 + visLen * 4, hidLen ).slice(),
+	};
+
+}
+
+function setLines( obj, arr ) {
+
+	obj.geometry.dispose();
+	const g = new BufferGeometry();
+	g.setAttribute( 'position', new Float32BufferAttribute( arr, 3 ) );
+	obj.geometry = g;
+
+}
+
+function setModel( geo ) {
+
+	if ( model ) { group.remove( model ); model.geometry.dispose(); }
+	model = new Mesh( geo, new MeshStandardMaterial( { color: 0xbfc4cc, flatShading: true } ) );
+	group.quaternion.identity();
+	group.add( model );
+
+	// model is already centered server-side; frame the camera to its size
+	const size = new Box3().setFromObject( model ).getSize( new Vector3() ).length() || 5;
+	camera.position.setScalar( size * 0.9 );
+	camera.near = size / 100;
+	camera.far = size * 50;
+	camera.updateProjectionMatrix();
+	controls.target.set( 0, 0, 0 );
 	needsRender = true;
 
 }
 
-// Export the visible projection as an SVG. Lines lie on the XZ plane (y=0),
-// so we use x and z; z is flipped so the top-down view isn't mirrored.
+// --- SVG export (lines lie on XZ plane, y=0; flip z so top-down isn't mirrored) ---
 function downloadSVG() {
 
 	const p = projection.geometry.attributes.position;
@@ -291,9 +261,9 @@ function downloadSVG() {
 	const w = maxX - minX, h = maxY - minY;
 	if ( ! isFinite( w ) || w <= 0 || h <= 0 ) return;
 
-	const mm = 300 / Math.max( w, h );      // longest side → 300mm
+	const mm = 300 / Math.max( w, h );
 	const stroke = Math.max( w, h ) / 800;
-	const minLen2 = ( Math.max( w, h ) * 1e-4 ) ** 2; // drop degenerate/near-zero segments
+	const minLen2 = ( Math.max( w, h ) * 1e-4 ) ** 2;
 
 	let d = '';
 	for ( let i = 0; i < p.count; i += 2 ) {
@@ -317,215 +287,11 @@ function downloadSVG() {
 
 }
 
-function applyPerObjectColors( edgeSet, geometry, lightness = 0.5 ) {
-
-	const totalVertices = geometry.attributes.position.count;
-	const colorArray = new Float32Array( totalVertices * 3 );
-	const color = new Color();
-
-	for ( const mesh of edgeSet.meshToSegments.keys() ) {
-
-		const range = edgeSet.getRangeForMesh( mesh );
-		if ( ! range ) continue;
-
-		color.setHSL( Math.random(), 0.75, lightness );
-
-
-		for ( let i = range.start; i < range.start + range.count; i ++ ) {
-
-			colorArray[ i * 3 + 0 ] = color.r;
-			colorArray[ i * 3 + 1 ] = color.g;
-			colorArray[ i * 3 + 2 ] = color.b;
-
-		}
-
-	}
-
-	geometry.setAttribute( 'color', new BufferAttribute( colorArray, 3 ) );
-
-}
-
 function render() {
 
 	requestAnimationFrame( render );
-
-	if ( model && ! generating ) model.visible = params.displayModel;
-	drawThroughProjection.visible = params.displayDrawThroughProjection;
-
-	if ( needsRender ) {
-
-		renderer.render( scene, camera );
-		needsRender = false;
-
-	}
-
-}
-
-// --- model uploading ------------------------------------------------------
-// Mesh formats via three.js loaders; CAD (B-rep) via OpenCASCADE (WASM).
-const cadReaders = { stp: 'ReadStepFile', step: 'ReadStepFile', igs: 'ReadIgesFile', iges: 'ReadIgesFile' };
-let occtPromise = null;
-const getOcct = () => ( occtPromise ||= occtimportjs( { locateFile: () => wasmUrl } ) );
-
-async function loadCAD( file, ext ) {
-
-	const occt = await getOcct();
-	const res = occt[ cadReaders[ ext ] ]( new Uint8Array( await file.arrayBuffer() ), null );
-	if ( ! res.success || ! res.meshes.length ) throw new Error( 'OCCT could not parse this file' );
-
-	const obj = new Group();
-	for ( const m of res.meshes ) {
-
-		const geom = new BufferGeometry();
-		geom.setAttribute( 'position', new Float32BufferAttribute( m.attributes.position.array, 3 ) );
-		if ( m.attributes.normal ) geom.setAttribute( 'normal', new Float32BufferAttribute( m.attributes.normal.array, 3 ) );
-		geom.setIndex( m.index.array );
-		if ( ! m.attributes.normal ) geom.computeVertexNormals();
-		obj.add( new Mesh( geom, new MeshStandardMaterial( { color: 0xbfc4cc, flatShading: true, wireframe: true } ) ) );
-
-	}
-
-	return obj;
-
-}
-
-// Decimate meshes whose combined triangle count exceeds `budget` down to it.
-// meshopt is WASM — fast even on millions of tris. Output is plotter-scale identical.
-// Returns [ beforeTris, afterTris ].
-async function simplifyMeshes( obj, budget ) {
-
-	const meshes = [];
-	obj.traverse( o => {
-
-		if ( o.isMesh ) meshes.push( o );
-
-	} );
-
-	const triCount = m => ( m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count ) / 3;
-	const before = meshes.reduce( ( n, m ) => n + triCount( m ), 0 );
-	if ( before <= budget ) return [ before, before ];
-
-	await MeshoptSimplifier.ready;
-	const ratio = budget / before;
-
-	for ( const m of meshes ) {
-
-		// weld so meshopt sees shared edges (STL/OBJ soup is non-indexed)
-		const src = m.geometry.index ? m.geometry : mergeVertices( m.geometry );
-		const posAttr = src.attributes.position;
-
-		// tight, non-interleaved position copy — GLB attributes are often interleaved,
-		// which a raw .array + stride-3 read would corrupt
-		const verts = new Float32Array( posAttr.count * 3 );
-		for ( let i = 0; i < posAttr.count; i ++ ) {
-
-			verts[ i * 3 ] = posAttr.getX( i );
-			verts[ i * 3 + 1 ] = posAttr.getY( i );
-			verts[ i * 3 + 2 ] = posAttr.getZ( i );
-
-		}
-
-		const index = src.index ? new Uint32Array( src.index.array ) : new Uint32Array( posAttr.count ).map( ( _, i ) => i );
-		const target = Math.max( 3, Math.floor( index.length * ratio / 3 ) * 3 );
-
-		const [ simplified ] = MeshoptSimplifier.simplify( index, verts, 3, target, 1.0, [ 'LockBorder' ] );
-		if ( simplified.length < 3 || simplified.length >= index.length ) continue; // nothing gained — keep original
-
-		const geo = new BufferGeometry();
-		geo.setAttribute( 'position', new BufferAttribute( verts, 3 ) );
-		geo.setIndex( new BufferAttribute( new Uint32Array( simplified ), 1 ) );
-		geo.computeVertexNormals();
-		m.geometry = geo;
-
-	}
-
-	const after = meshes.reduce( ( n, m ) => n + triCount( m ), 0 );
-	return [ before, after ];
-
-}
-
-async function onUpload( e ) {
-
-	const file = e.target.files[ 0 ];
-	if ( ! file ) return;
-	const ext = file.name.split( '.' ).pop().toLowerCase();
-
-	outputContainer.innerText = cadReaders[ ext ] ? 'Tessellating CAD model...' : 'Loading...';
-
-	try {
-
-		let obj;
-		if ( cadReaders[ ext ] ) {
-
-			obj = await loadCAD( file, ext );
-
-		} else {
-
-			const url = URL.createObjectURL( file );
-			if ( ext === 'glb' || ext === 'gltf' ) {
-
-				obj = ( await new GLTFLoader().setMeshoptDecoder( MeshoptDecoder ).loadAsync( url ) ).scene;
-
-			} else if ( ext === 'obj' ) {
-
-				obj = await new OBJLoader().loadAsync( url );
-
-			} else if ( ext === 'stl' ) {
-
-				obj = new Mesh( await new STLLoader().loadAsync( url ), new MeshStandardMaterial( { color: 0xbfc4cc, flatShading: true } ) );
-
-			} else {
-
-				URL.revokeObjectURL( url );
-				outputContainer.innerText = `Unsupported format: .${ ext }`;
-				return;
-
-			}
-
-			URL.revokeObjectURL( url );
-
-		}
-
-		// decimate before projection — the edge generator is O(triangles) on the CPU
-		const [ before, after ] = await simplifyMeshes( obj, params.simplifyBudget );
-		if ( after < before ) {
-
-			outputContainer.innerText = `Simplified ${ ( before / 1000 ).toFixed( 0 ) }k → ${ ( after / 1000 ).toFixed( 0 ) }k tris`;
-
-		}
-
-		// swap into the group using the same centering the example uses on load
-		group.remove( model );
-		model = obj;
-		group.quaternion.identity();
-		group.position.set( 0, 0, 0 );
-		group.updateMatrixWorld( true );
-
-		const box = new Box3();
-		box.setFromObject( model, true );
-		box.getCenter( group.position ).multiplyScalar( - 1 );
-		group.position.y = Math.max( 0, - box.min.y ) + 1;
-		group.add( model );
-		group.updateMatrixWorld( true );
-
-		// frame the camera to the new model's size. near/far are scaled to the model so
-		// the depth-buffer ratio stays tight — a fixed near=0.01 on a large model wrecks
-		// depth precision and causes surface z-fighting in the preview.
-		const size = box.getSize( new Vector3() ).length() || 5;
-		camera.position.setScalar( size * 0.9 );
-		camera.near = size / 100;
-		camera.far = size * 50;
-		camera.updateProjectionMatrix();
-		controls.target.set( 0, 0, 0 );
-
-		needsRender = true;
-		updateEdges();
-
-	} catch ( err ) {
-
-		console.error( err );
-		outputContainer.innerText = `Load failed: ${ err.message }`;
-
-	}
+	if ( model ) model.visible = params.displayModel;
+	drawThrough.visible = params.displayDrawThroughProjection;
+	if ( needsRender ) { renderer.render( scene, camera ); needsRender = false; }
 
 }

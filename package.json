@@ -5,9 +5,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "postinstall": "patch-package",
+    "tauri": "tauri"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "clipper2-js": "^0.9.0",
     "meshoptimizer": "^1.1.1",
     "occt-import-js": "^0.0.23",
@@ -16,6 +20,8 @@
     "three-mesh-bvh": "^0.9.10"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.3",
+    "patch-package": "^8.0.1",
     "vite": "^6.0.0"
   }
 }

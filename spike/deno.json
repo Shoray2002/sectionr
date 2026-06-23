@@ -1,0 +1,9 @@
+{
+  "imports": {
+    "three": "../node_modules/three/build/three.webgpu.js",
+    "three/webgpu": "../node_modules/three/build/three.webgpu.js",
+    "three/tsl": "../node_modules/three/build/three.tsl.js",
+    "three-mesh-bvh": "../node_modules/three-mesh-bvh/src/index.js",
+    "three-edge-projection/webgpu": "../node_modules/three-edge-projection/src/webgpu/index.js"
+  }
+}
