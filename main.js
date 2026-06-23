@@ -107,7 +107,8 @@ function init() {
 	previewCamera.up.set( 0, 0, - 1 ); // world -Z is "up" in the print, matching the SVG y = -z
 
 	// zoom the projection preview with the wheel
-	previewRenderer.domElement.addEventListener( 'wheel', ( e ) => {
+	const pv = previewRenderer.domElement;
+	pv.addEventListener( 'wheel', ( e ) => {
 
 		e.preventDefault();
 		previewCamera.zoom = Math.max( 0.2, previewCamera.zoom * ( 1 - e.deltaY * 0.001 ) );
@@ -115,6 +116,23 @@ function init() {
 		previewNeedsRender = true;
 
 	}, { passive: false } );
+
+	// drag to pan the preview (along the print plane: world X/Z), scaled by zoom
+	let panning = false, px = 0, py = 0;
+	pv.addEventListener( 'pointerdown', ( e ) => { panning = true; px = e.clientX; py = e.clientY; pv.setPointerCapture( e.pointerId ); } );
+	pv.addEventListener( 'pointermove', ( e ) => {
+
+		if ( ! panning ) return;
+		const perPx = ( previewCamera.right - previewCamera.left ) / previewCamera.zoom / pv.clientWidth;
+		previewCamera.position.x -= ( e.clientX - px ) * perPx;
+		previewCamera.position.z -= ( e.clientY - py ) * perPx; // up=-Z, so screen-down -> +z
+		px = e.clientX; py = e.clientY;
+		previewNeedsRender = true;
+
+	} );
+	const endPan = () => panning = false;
+	pv.addEventListener( 'pointerup', endPan );
+	pv.addEventListener( 'pointercancel', endPan );
 
 	bindUI();
 	attachArcball();
