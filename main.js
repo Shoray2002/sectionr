@@ -41,6 +41,9 @@ const params = {
 	displayDrawThroughProjection: false,
 	includeIntersectionEdges: false,
 	angleThreshold: 50,
+	visibilityCullMeshes: false,
+	decimate: false,
+	simplifyBudget: 200000,
 };
 
 let needsRender = false, previewNeedsRender = false;
@@ -112,6 +115,8 @@ function bindUI() {
 	bindCheck( 'displayModel', () => needsRender = true );
 	bindCheck( 'displayDrawThroughProjection', () => previewNeedsRender = true );
 	bindCheck( 'includeIntersectionEdges' );
+	bindCheck( 'visibilityCullMeshes' );
+	bindCheck( 'decimate' );
 
 	const angleEl = document.getElementById( 'angleThreshold' );
 	angleEl.value = params.angleThreshold;
@@ -119,6 +124,16 @@ function bindUI() {
 
 		params.angleThreshold = + angleEl.value;
 		document.getElementById( 'angleVal' ).textContent = angleEl.value;
+
+	} );
+
+	const budgetEl = document.getElementById( 'simplifyBudget' );
+	budgetEl.value = params.simplifyBudget;
+	budgetEl.addEventListener( 'input', () => {
+
+		params.simplifyBudget = + budgetEl.value;
+		const v = params.simplifyBudget;
+		document.getElementById( 'budgetVal' ).textContent = v >= 1e6 ? `${ ( v / 1e6 ).toFixed( 1 ) }M` : `${ ( v / 1000 ) | 0 }k`;
 
 	} );
 
@@ -241,6 +256,8 @@ async function generate() {
 				quaternion: [ q.x, q.y, q.z, q.w ],
 				angleThreshold: params.angleThreshold,
 				includeIntersectionEdges: params.includeIntersectionEdges,
+				visibilityCull: params.visibilityCullMeshes,
+				simplifyBudget: params.decimate ? params.simplifyBudget : 0,
 			} ),
 		} );
 

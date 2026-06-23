@@ -59,6 +59,15 @@
       <button id="reset">Reset orientation</button>
       <button id="regenerate" class="primary">Generate projection</button>
 
+      <h2>Performance</h2>
+      <div class="check"><input id="visibilityCullMeshes" type="checkbox"><label for="visibilityCullMeshes">Cull hidden faces</label></div>
+      <div class="check"><input id="decimate" type="checkbox"><label for="decimate">Decimate before projecting</label></div>
+      <div style="margin:10px 0 0">
+        <label for="simplifyBudget">Triangle budget: <span id="budgetVal">200k</span></label>
+        <input id="simplifyBudget" type="range" min="10000" max="2000000" step="10000" value="200000" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
+      </div>
+      <p class="hint">Fewer triangles = faster projection, fewer lines.</p>
+
       <h2>Export</h2>
       <button id="downloadSVG" disabled>Download SVG</button>
       <p class="hint">Longest side scaled to 300&nbsp;mm.</p>

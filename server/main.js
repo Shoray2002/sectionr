@@ -12,7 +12,7 @@
 //                          -> applies orientation, projects, returns line segments (binary)
 
 import * as THREE from "three/webgpu";
-import { ProjectionGenerator } from "three-edge-projection/webgpu";
+import { ProjectionGenerator, MeshVisibilityCuller } from "three-edge-projection/webgpu";
 import { GLTFLoader } from "../node_modules/three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "../node_modules/three/examples/jsm/loaders/STLLoader.js";
 import { OBJLoader } from "../node_modules/three/examples/jsm/loaders/OBJLoader.js";
@@ -39,7 +39,8 @@ const stubCanvas = { setAttribute() {}, getContext: () => null, addEventListener
 const renderer = new THREE.WebGPURenderer({ antialias: false, canvas: stubCanvas });
 await renderer.init();
 
-let fullRes = null; // currently loaded full-resolution Object3D
+let fullRes = null;   // currently loaded full-resolution Object3D (pivot Group)
+let decimated = null; // cached projection input: { budget, pivot }
 
 function disposeObject(obj) {
   obj?.traverse?.((o) => { if (o.isMesh) o.geometry?.dispose?.(); });
@@ -96,36 +97,66 @@ function mergedPositions(obj) {
   return list.length === 1 ? list[0] : mergeGeometries(list, false);
 }
 
+// meshopt-decimate an indexed geometry's index down to a triangle budget (in place)
+async function decimate(geo, budget) {
+  const tris = geo.index.count / 3;
+  if (!budget || budget >= tris) return geo;
+  await MeshoptSimplifier.ready;
+  const verts = geo.attributes.position.array;
+  const index = geo.index.array instanceof Uint32Array ? geo.index.array : new Uint32Array(geo.index.array);
+  const target = Math.max(3, Math.floor((index.length * (budget / tris)) / 3) * 3);
+  const [simp] = MeshoptSimplifier.simplify(index, verts, 3, target, 1.0, ["LockBorder"]);
+  if (simp.length >= 3 && simp.length < index.length) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(simp), 1));
+  return geo;
+}
+
 // build a decimated, welded, indexed proxy for display
 async function buildProxy(obj) {
-  let geo = mergeVertices(mergedPositions(obj));
-  const tris = geo.index.count / 3;
-  if (tris > PROXY_BUDGET) {
-    await MeshoptSimplifier.ready;
-    const verts = geo.attributes.position.array;
-    const index = geo.index.array instanceof Uint32Array ? geo.index.array : new Uint32Array(geo.index.array);
-    const target = Math.max(3, Math.floor((index.length * (PROXY_BUDGET / tris)) / 3) * 3);
-    const [simp] = MeshoptSimplifier.simplify(index, verts, 3, target, 1.0, ["LockBorder"]);
-    if (simp.length >= 3 && simp.length < index.length) geo.setIndex(new THREE.BufferAttribute(new Uint32Array(simp), 1));
-  }
+  const geo = await decimate(mergeVertices(mergedPositions(obj)), PROXY_BUDGET);
   geo.computeVertexNormals();
   return geo;
 }
 
+// build a decimated copy of fullRes wrapped in a centered pivot, to project at
+// lower detail. fullRes is forced to identity first so the merge isn't baked
+// with a prior orientation; the caller sets the pivot's quaternion afterward.
+async function buildDecimatedPivot(budget) {
+  fullRes.quaternion.identity();
+  fullRes.updateMatrixWorld(true);
+  const geo = await decimate(mergeVertices(mergedPositions(fullRes)), budget);
+  const pivot = new THREE.Group();
+  pivot.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial()));
+  return pivot;
+}
+
 // --- projection ------------------------------------------------------------
 
-async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false } = {}) {
+async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0 } = {}) {
   if (!fullRes) throw new Error("no model loaded");
-  // fullRes is a pivot Group centered on the model; rotating it spins about the center.
-  fullRes.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
-  fullRes.updateMatrixWorld(true);
+
+  // pick projection input: full detail, or a cached decimated copy at the budget
+  let target = fullRes;
+  if (simplifyBudget > 0) {
+    if (!decimated || decimated.budget !== simplifyBudget) {
+      disposeObject(decimated?.pivot);
+      decimated = { budget: simplifyBudget, pivot: await buildDecimatedPivot(simplifyBudget) };
+    }
+    target = decimated.pivot;
+  }
+
+  // target is a pivot Group centered on the model; rotating it spins about the center.
+  target.quaternion.set(quat[0], quat[1], quat[2], quat[3]);
+  target.updateMatrixWorld(true);
 
   const gen = new ProjectionGenerator(renderer);
   gen.includeIntersectionEdges = includeIntersectionEdges;
   gen.angleThreshold = angleThreshold;
   gen.batchSize = 1_000_000; // fewer GPU jobs/readbacks than the 100k default
 
-  const result = await gen.generate(fullRes, { onProgress: () => {} });
+  // optionally drop meshes/faces not visible from the projection direction
+  const input = visibilityCull ? await new MeshVisibilityCuller(renderer, { pixelsPerMeter: 0.1 }).cull(target) : target;
+
+  const result = await gen.generate(input, { onProgress: () => {} });
   return {
     vis: result.visibleEdges.getLineGeometry().attributes.position.array,
     hid: result.hiddenEdges.getLineGeometry().attributes.position.array,
@@ -178,6 +209,8 @@ Deno.serve({ port, hostname: "127.0.0.1", onListen: () => console.log(`sectionr 
       pivot.add(obj);
       pivot.updateMatrixWorld(true);
       disposeObject(fullRes);
+      disposeObject(decimated?.pivot);
+      decimated = null;
       fullRes = pivot;
       const tris = triangleCount(fullRes);
       const proxy = await buildProxy(fullRes);
