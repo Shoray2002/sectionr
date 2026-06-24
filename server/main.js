@@ -41,7 +41,7 @@ const renderer = new THREE.WebGPURenderer({ antialias: false, canvas: stubCanvas
 await renderer.init();
 
 let fullRes = null;   // currently loaded full-resolution Object3D (pivot Group)
-let decimated = null; // cached projection input: { budget, pivot }
+let projCache = null; // cached projection input: { budget, smooth, pivot }
 
 function disposeObject(obj) {
   obj?.traverse?.((o) => { if (o.isMesh) o.geometry?.dispose?.(); });
@@ -119,13 +119,46 @@ async function buildProxy(obj) {
   return geo;
 }
 
-// build a decimated copy of fullRes wrapped in a centered pivot, to project at
-// lower detail. fullRes is forced to identity first so the merge isn't baked
-// with a prior orientation; the caller sets the pivot's quaternion afterward.
-async function buildDecimatedPivot(budget) {
+// Taubin (λ|μ) mesh smoothing on an indexed position geometry, in place. A
+// low-pass over the surface: high-frequency tessellation facets flatten toward
+// coplanar (so they fall below the edge-angle threshold) while coherent feature
+// ridges survive. λ>0 then μ<0 each pass cancels Laplacian shrinkage.
+function taubinSmooth(geo, iters, lambda = 0.5, mu = -0.53) {
+  const px = geo.attributes.position.array;
+  const idx = geo.index.array;
+  const n = px.length / 3;
+  // one-ring adjacency (duplicates allowed — acts as valence weighting, fine here)
+  const nbr = Array.from({ length: n }, () => []);
+  for (let i = 0; i < idx.length; i += 3) {
+    const a = idx[i], b = idx[i + 1], c = idx[i + 2];
+    nbr[a].push(b, c); nbr[b].push(a, c); nbr[c].push(a, b);
+  }
+  const tmp = new Float32Array(px.length);
+  const step = (f) => {
+    for (let v = 0; v < n; v++) {
+      const ns = nbr[v], k = ns.length;
+      if (!k) { tmp[v * 3] = px[v * 3]; tmp[v * 3 + 1] = px[v * 3 + 1]; tmp[v * 3 + 2] = px[v * 3 + 2]; continue; }
+      let sx = 0, sy = 0, sz = 0;
+      for (let j = 0; j < k; j++) { const w = ns[j] * 3; sx += px[w]; sy += px[w + 1]; sz += px[w + 2]; }
+      tmp[v * 3] = px[v * 3] + f * (sx / k - px[v * 3]);
+      tmp[v * 3 + 1] = px[v * 3 + 1] + f * (sy / k - px[v * 3 + 1]);
+      tmp[v * 3 + 2] = px[v * 3 + 2] + f * (sz / k - px[v * 3 + 2]);
+    }
+    px.set(tmp);
+  };
+  for (let it = 0; it < iters; it++) { step(lambda); step(mu); }
+  geo.attributes.position.needsUpdate = true;
+}
+
+// build the projection input (welded, optionally decimated then smoothed) wrapped
+// in a centered pivot. fullRes is forced to identity first so the merge isn't
+// baked with a prior orientation; the caller sets the pivot's quaternion after.
+async function buildProjInput(budget, smooth) {
   fullRes.quaternion.identity();
   fullRes.updateMatrixWorld(true);
-  const geo = await decimate(mergeVertices(mergedPositions(fullRes)), budget);
+  let geo = mergeVertices(mergedPositions(fullRes));
+  if (budget > 0) geo = await decimate(geo, budget);
+  if (smooth > 0) taubinSmooth(geo, smooth);
   const pivot = new THREE.Group();
   pivot.add(new THREE.Mesh(geo, new THREE.MeshStandardMaterial()));
   return pivot;
@@ -133,17 +166,20 @@ async function buildDecimatedPivot(budget) {
 
 // --- projection ------------------------------------------------------------
 
-async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0 } = {}) {
+async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0 } = {}) {
   if (!fullRes) throw new Error("no model loaded");
 
-  // pick projection input: full detail, or a cached decimated copy at the budget
+  // pick projection input. budget=0 & smooth=0 -> project fullRes directly (avoids
+  // an expensive weld of the full mesh). Otherwise build & cache a processed copy.
+  const budget = simplifyBudget > 0 ? simplifyBudget : 0;
+  smooth = smooth | 0;
   let target = fullRes;
-  if (simplifyBudget > 0) {
-    if (!decimated || decimated.budget !== simplifyBudget) {
-      disposeObject(decimated?.pivot);
-      decimated = { budget: simplifyBudget, pivot: await buildDecimatedPivot(simplifyBudget) };
+  if (budget > 0 || smooth > 0) {
+    if (!projCache || projCache.budget !== budget || projCache.smooth !== smooth) {
+      disposeObject(projCache?.pivot);
+      projCache = { budget, smooth, pivot: await buildProjInput(budget, smooth) };
     }
-    target = decimated.pivot;
+    target = projCache.pivot;
   }
 
   // target is a pivot Group centered on the model; rotating it spins about the center.
@@ -211,8 +247,8 @@ Deno.serve({ port, hostname: "127.0.0.1", onListen: () => console.log(`sectionr 
       pivot.add(obj);
       pivot.updateMatrixWorld(true);
       disposeObject(fullRes);
-      disposeObject(decimated?.pivot);
-      decimated = null;
+      disposeObject(projCache?.pivot);
+      projCache = null;
       fullRes = pivot;
       const tris = triangleCount(fullRes);
       const proxy = await buildProxy(fullRes);
