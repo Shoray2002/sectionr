@@ -17,6 +17,7 @@ import { GLTFLoader } from "../node_modules/three/examples/jsm/loaders/GLTFLoade
 import { STLLoader } from "../node_modules/three/examples/jsm/loaders/STLLoader.js";
 import { OBJLoader } from "../node_modules/three/examples/jsm/loaders/OBJLoader.js";
 import { MeshoptDecoder } from "../node_modules/three/examples/jsm/libs/meshopt_decoder.module.js";
+import { makeDracoLoader } from "./draco.js";
 import { mergeVertices, mergeGeometries } from "../node_modules/three/examples/jsm/utils/BufferGeometryUtils.js";
 import { MeshoptSimplifier } from "meshoptimizer";
 
@@ -69,6 +70,7 @@ async function parseModel(path) {
     const loader = new GLTFLoader();
     await MeshoptDecoder.ready;
     loader.setMeshoptDecoder(MeshoptDecoder);
+    loader.setDRACOLoader(makeDracoLoader());
     return await new Promise((res, rej) => loader.parse(ab, "", (g) => res(g.scene), rej));
   }
   throw new Error(`unsupported format: .${ext}`);

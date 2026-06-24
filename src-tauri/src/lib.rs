@@ -10,6 +10,11 @@ fn save_svg(path: String, content: String) -> Result<(), String> {
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn read_file(path: String) -> Result<String, String> {
+    std::fs::read_to_string(&path).map_err(|e| e.to_string())
+}
+
 fn spawn_sidecar() -> std::io::Result<Child> {
     // project root = parent of src-tauri (dev). server/main.js + deno.json live here.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -34,7 +39,7 @@ fn spawn_sidecar() -> std::io::Result<Child> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![save_svg])
+        .invoke_handler(tauri::generate_handler![save_svg, read_file])
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(

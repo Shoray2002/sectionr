@@ -9,7 +9,6 @@
 import {
 	Scene,
 	WebGLRenderer,
-	PerspectiveCamera,
 	OrthographicCamera,
 	Group,
 	Mesh,
@@ -52,7 +51,7 @@ const params = {
 };
 
 let needsRender = false, previewNeedsRender = false;
-let renderer, camera, scene, group, model, gizmo;
+let renderer, camera, scene, group, model, gizmo, viewSize = 1, modelPath = null;
 let previewRenderer, previewCamera, previewScene, projection, drawThrough;
 let view, preview, outputContainer;
 
@@ -81,7 +80,8 @@ function init() {
 
 	// camera fixed on +Z looking down -Z (identity orientation) — keeps the
 	// arcball axes aligned with screen axes and the projection math trivial.
-	camera = new PerspectiveCamera( 75, view.clientWidth / view.clientHeight, 0.01, 1e6 );
+	// orthographic so the positioning view has no perspective distortion.
+	camera = new OrthographicCamera( - 1, 1, 1, - 1, 0.01, 1e6 );
 	camera.position.set( 0, 0, 5 );
 
 	// rotation gimbal — attaches to the model group; rings give precise per-axis
@@ -142,15 +142,33 @@ function init() {
 
 }
 
+function fmtBudget( v ) { return v >= 1e6 ? `${ ( v / 1e6 ).toFixed( 1 ) }M` : `${ ( v / 1000 ) | 0 }k`; }
+function $( id ) { return document.getElementById( id ); }
+
+// push every params value into its control + dependent display. Called on
+// startup and after loading a config, so the UI always reflects params.
+function syncUI() {
+
+	for ( const id of [ 'displayModel', 'displayDrawThroughProjection', 'includeIntersectionEdges', 'visibilityCullMeshes', 'decimate' ] ) $( id ).checked = params[ id ];
+	$( 'angleThreshold' ).value = params.angleThreshold;
+	$( 'angleVal' ).textContent = params.angleThreshold;
+	$( 'simplifyBudget' ).value = params.simplifyBudget;
+	$( 'budgetVal' ).textContent = fmtBudget( params.simplifyBudget );
+	$( 'visibleColor' ).value = params.visibleColor;
+	$( 'hiddenColor' ).value = params.hiddenColor;
+	projection.material.color.set( params.visibleColor );
+	drawThrough.material.color.set( params.hiddenColor );
+	$( 'strokeWidth' ).value = params.strokeWidth;
+	$( 'widthVal' ).textContent = params.strokeWidth.toFixed( 2 );
+	$( 'previewBg' ).value = params.previewBg;
+	previewRenderer.setClearColor( params.previewBg, 1 );
+	needsRender = previewNeedsRender = true;
+
+}
+
 function bindUI() {
 
-	const bindCheck = ( id, onChange ) => {
-
-		const el = document.getElementById( id );
-		el.checked = params[ id ];
-		el.addEventListener( 'change', () => { params[ id ] = el.checked; if ( onChange ) onChange(); } );
-
-	};
+	const bindCheck = ( id, onChange ) => $( id ).addEventListener( 'change', () => { params[ id ] = $( id ).checked; if ( onChange ) onChange(); } );
 
 	bindCheck( 'displayModel', () => needsRender = true );
 	bindCheck( 'displayDrawThroughProjection', () => previewNeedsRender = true );
@@ -158,65 +176,24 @@ function bindUI() {
 	bindCheck( 'visibilityCullMeshes' );
 	bindCheck( 'decimate' );
 
-	const angleEl = document.getElementById( 'angleThreshold' );
-	angleEl.value = params.angleThreshold;
-	angleEl.addEventListener( 'input', () => {
+	$( 'angleThreshold' ).addEventListener( 'input', ( e ) => { params.angleThreshold = + e.target.value; $( 'angleVal' ).textContent = e.target.value; } );
+	$( 'simplifyBudget' ).addEventListener( 'input', ( e ) => { params.simplifyBudget = + e.target.value; $( 'budgetVal' ).textContent = fmtBudget( params.simplifyBudget ); } );
 
-		params.angleThreshold = + angleEl.value;
-		document.getElementById( 'angleVal' ).textContent = angleEl.value;
-
-	} );
-
-	const budgetEl = document.getElementById( 'simplifyBudget' );
-	budgetEl.value = params.simplifyBudget;
-	budgetEl.addEventListener( 'input', () => {
-
-		params.simplifyBudget = + budgetEl.value;
-		const v = params.simplifyBudget;
-		document.getElementById( 'budgetVal' ).textContent = v >= 1e6 ? `${ ( v / 1e6 ).toFixed( 1 ) }M` : `${ ( v / 1000 ) | 0 }k`;
-
-	} );
-
-	const bindColor = ( id, line ) => {
-
-		const el = document.getElementById( id );
-		el.value = params[ id ];
-		el.addEventListener( 'input', () => { params[ id ] = el.value; line.material.color.set( el.value ); previewNeedsRender = true; } );
-
-	};
-
+	const bindColor = ( id, line ) => $( id ).addEventListener( 'input', ( e ) => { params[ id ] = e.target.value; line.material.color.set( e.target.value ); previewNeedsRender = true; } );
 	bindColor( 'visibleColor', projection );
 	bindColor( 'hiddenColor', drawThrough );
 
-	const widthEl = document.getElementById( 'strokeWidth' );
-	widthEl.value = params.strokeWidth;
-	widthEl.addEventListener( 'input', () => {
+	$( 'strokeWidth' ).addEventListener( 'input', ( e ) => { params.strokeWidth = + e.target.value; $( 'widthVal' ).textContent = params.strokeWidth.toFixed( 2 ); } );
+	$( 'previewBg' ).addEventListener( 'change', ( e ) => { params.previewBg = e.target.value; previewRenderer.setClearColor( params.previewBg, 1 ); previewNeedsRender = true; } );
 
-		params.strokeWidth = + widthEl.value;
-		document.getElementById( 'widthVal' ).textContent = params.strokeWidth.toFixed( 2 );
+	$( 'open' ).addEventListener( 'click', openModel );
+	$( 'reset' ).addEventListener( 'click', () => { if ( model ) { group.quaternion.identity(); needsRender = true; } } );
+	$( 'regenerate' ).addEventListener( 'click', generate );
+	$( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
+	$( 'saveConfig' ).addEventListener( 'click', saveConfig );
+	$( 'loadConfig' ).addEventListener( 'click', loadConfig );
 
-	} );
-
-	const bgEl = document.getElementById( 'previewBg' );
-	bgEl.value = params.previewBg;
-	bgEl.addEventListener( 'change', () => {
-
-		params.previewBg = bgEl.value;
-		previewRenderer.setClearColor( params.previewBg, 1 );
-		previewNeedsRender = true;
-
-	} );
-
-	document.getElementById( 'open' ).addEventListener( 'click', openModel );
-	document.getElementById( 'reset' ).addEventListener( 'click', () => {
-
-		if ( ! model ) return;
-		group.quaternion.identity();
-		needsRender = true;
-
-	} );
-	document.getElementById( 'regenerate' ).addEventListener( 'click', generate );
-	document.getElementById( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
+	syncUI();
 
 }
 
@@ -262,7 +239,8 @@ function attachArcball() {
 	el.addEventListener( 'wheel', ( e ) => {
 
 		e.preventDefault();
-		camera.position.z = Math.max( 0.05, camera.position.z * ( 1 + e.deltaY * 0.001 ) );
+		camera.zoom = Math.max( 0.05, camera.zoom * ( 1 - e.deltaY * 0.001 ) );
+		camera.updateProjectionMatrix();
 		needsRender = true;
 
 	}, { passive: false } );
@@ -284,7 +262,12 @@ function viewportQuaternion() {
 async function openModel() {
 
 	const path = await open( { multiple: false, filters: [ { name: '3D model', extensions: [ 'glb', 'gltf', 'stl', 'obj' ] } ] } );
-	if ( ! path ) return;
+	if ( path ) await loadModelFromPath( path );
+
+}
+
+// load a model into the sidecar by path, show its proxy. Returns true on success.
+async function loadModelFromPath( path ) {
 
 	outputContainer.innerText = 'Loading…';
 	let res;
@@ -295,16 +278,67 @@ async function openModel() {
 	} catch ( e ) {
 
 		outputContainer.innerText = `Sidecar unreachable — is it running? (${ e.message })`;
+		return false;
+
+	}
+
+	if ( ! res.ok ) { outputContainer.innerText = `Load failed: ${ await res.text() }`; return false; }
+
+	const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
+	setModel( decodeProxy( await res.arrayBuffer() ) );
+	modelPath = path;
+	$( 'downloadSVG' ).disabled = true;
+	outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — position, then Generate projection`;
+	return true;
+
+}
+
+// --- config: save/restore the full setup (model + orientation + all dials) ---
+
+async function saveConfig() {
+
+	if ( ! model || ! modelPath ) { outputContainer.innerText = 'Load a model first'; return; }
+
+	const config = { modelPath, quaternion: group.quaternion.toArray(), params };
+	const path = await save( { defaultPath: 'sectionr-config.json', filters: [ { name: 'Config', extensions: [ 'json' ] } ] } );
+	if ( ! path ) return;
+	try {
+
+		await invoke( 'save_svg', { path, content: JSON.stringify( config, null, 2 ) } );
+		outputContainer.innerText = `Saved config ${ path }`;
+
+	} catch ( e ) {
+
+		outputContainer.innerText = `Save failed: ${ e }`;
+
+	}
+
+}
+
+async function loadConfig() {
+
+	const path = await open( { multiple: false, filters: [ { name: 'Config', extensions: [ 'json' ] } ] } );
+	if ( ! path ) return;
+
+	let config;
+	try {
+
+		config = JSON.parse( await invoke( 'read_file', { path } ) );
+
+	} catch ( e ) {
+
+		outputContainer.innerText = `Bad config: ${ e }`;
 		return;
 
 	}
 
-	if ( ! res.ok ) { outputContainer.innerText = `Load failed: ${ await res.text() }`; return; }
+	if ( ! await loadModelFromPath( config.modelPath ) ) return; // resets group.quaternion to identity
 
-	const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
-	setModel( decodeProxy( await res.arrayBuffer() ) );
-	document.getElementById( 'downloadSVG' ).disabled = true;
-	outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — position, then Generate projection`;
+	Object.assign( params, config.params || {} );
+	syncUI();
+	if ( config.quaternion ) group.quaternion.fromArray( config.quaternion );
+	needsRender = true;
+	generate(); // recreate the projection from the restored setup
 
 }
 
@@ -398,12 +432,14 @@ function setModel( geo ) {
 	group.add( model );
 	gizmo.attach( group );
 
-	// model is already centered server-side; frame the camera to its size
+	// model is already centered server-side; frame the ortho camera to its size
 	const size = new Box3().setFromObject( model ).getSize( new Vector3() ).length() || 5;
-	camera.position.set( 0, 0, size * 0.9 );
-	camera.near = size / 100;
-	camera.far = size * 50;
-	camera.updateProjectionMatrix();
+	viewSize = size * 0.6;
+	camera.position.set( 0, 0, size * 2 );
+	camera.near = 0.01;
+	camera.far = size * 10;
+	camera.zoom = 1;
+	frameMainCamera();
 	needsRender = true;
 
 }
@@ -439,10 +475,19 @@ function framePreview() {
 
 }
 
+// fit the main ortho frustum to viewSize and the current view aspect
+function frameMainCamera() {
+
+	const aspect = view.clientWidth / view.clientHeight || 1;
+	camera.left = - viewSize * aspect; camera.right = viewSize * aspect;
+	camera.top = viewSize; camera.bottom = - viewSize;
+	camera.updateProjectionMatrix();
+
+}
+
 function resize() {
 
-	camera.aspect = view.clientWidth / view.clientHeight;
-	camera.updateProjectionMatrix();
+	frameMainCamera();
 	renderer.setSize( view.clientWidth, view.clientHeight );
 	previewRenderer.setSize( preview.clientWidth, preview.clientHeight );
 	framePreview();
