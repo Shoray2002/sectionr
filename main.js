@@ -37,9 +37,9 @@ const API = 'http://127.0.0.1:8787';
 const PROJ_SWAP = new Quaternion().setFromAxisAngle( new Vector3( 1, 0, 0 ), - Math.PI / 2 );
 
 const params = {
-	displayModel: true,
 	displayDrawThroughProjection: false,
 	includeIntersectionEdges: false,
+	smoothSilhouettes: false, // interpolated contours instead of jagged mesh-edge silhouettes (curved models)
 	angleThreshold: 50,
 	visibilityCullMeshes: false,
 	decimate: false,
@@ -142,6 +142,7 @@ function init() {
 
 	bindUI();
 	attachArcball();
+	attachDivider();
 
 	window.addEventListener( 'resize', resize );
 	render();
@@ -155,7 +156,7 @@ function $( id ) { return document.getElementById( id ); }
 // startup and after loading a config, so the UI always reflects params.
 function syncUI() {
 
-	for ( const id of [ 'displayModel', 'displayDrawThroughProjection', 'includeIntersectionEdges', 'visibilityCullMeshes', 'decimate', 'removeOverlaps' ] ) $( id ).checked = params[ id ];
+	for ( const id of [ 'displayDrawThroughProjection', 'includeIntersectionEdges', 'smoothSilhouettes', 'visibilityCullMeshes', 'decimate', 'removeOverlaps' ] ) $( id ).checked = params[ id ];
 	$( 'angleThreshold' ).value = params.angleThreshold;
 	$( 'angleVal' ).textContent = params.angleThreshold;
 	$( 'smooth' ).value = params.smooth;
@@ -182,9 +183,9 @@ function bindUI() {
 
 	const bindCheck = ( id, onChange ) => $( id ).addEventListener( 'change', () => { params[ id ] = $( id ).checked; if ( onChange ) onChange(); } );
 
-	bindCheck( 'displayModel', () => needsRender = true );
 	bindCheck( 'displayDrawThroughProjection', () => previewNeedsRender = true );
 	bindCheck( 'includeIntersectionEdges' );
+	bindCheck( 'smoothSilhouettes' );
 	bindCheck( 'visibilityCullMeshes' );
 	bindCheck( 'decimate' );
 	bindCheck( 'removeOverlaps', rebuildLines );
@@ -204,12 +205,50 @@ function bindUI() {
 
 	$( 'open' ).addEventListener( 'click', openModel );
 	$( 'reset' ).addEventListener( 'click', () => { if ( model ) { group.quaternion.identity(); needsRender = true; } } );
+
+	// orientation snaps (absolute view) + flips (relative 180° turn about a world axis)
+	const AX = new Vector3( 1, 0, 0 ), AY = new Vector3( 0, 1, 0 ), AZ = new Vector3( 0, 0, 1 ), _q = new Quaternion();
+	const snap = ( fn ) => () => { if ( ! model ) return; fn(); needsRender = true; };
+	$( 'snapFront' ).addEventListener( 'click', snap( () => group.quaternion.identity() ) );
+	$( 'snapBack' ).addEventListener( 'click', snap( () => group.quaternion.setFromAxisAngle( AY, Math.PI ) ) );
+	$( 'snapRight' ).addEventListener( 'click', snap( () => group.quaternion.setFromAxisAngle( AY, - Math.PI / 2 ) ) );
+	$( 'snapLeft' ).addEventListener( 'click', snap( () => group.quaternion.setFromAxisAngle( AY, Math.PI / 2 ) ) );
+	$( 'snapTop' ).addEventListener( 'click', snap( () => group.quaternion.setFromAxisAngle( AX, Math.PI / 2 ) ) );
+	$( 'snapDown' ).addEventListener( 'click', snap( () => group.quaternion.setFromAxisAngle( AX, - Math.PI / 2 ) ) );
+	const flip = ( axis ) => snap( () => group.quaternion.premultiply( _q.setFromAxisAngle( axis, Math.PI ) ) );
+	$( 'flipX' ).addEventListener( 'click', flip( AX ) );
+	$( 'flipY' ).addEventListener( 'click', flip( AY ) );
+	$( 'flipZ' ).addEventListener( 'click', flip( AZ ) );
 	$( 'regenerate' ).addEventListener( 'click', generate );
 	$( 'downloadSVG' ).addEventListener( 'click', downloadSVG );
 	$( 'saveConfig' ).addEventListener( 'click', saveConfig );
 	$( 'loadConfig' ).addEventListener( 'click', loadConfig );
 
 	syncUI();
+
+}
+
+// drag the middle divider to resize the two panes
+function attachDivider() {
+
+	const divider = document.getElementById( 'divider' );
+	const app = document.getElementById( 'app' );
+	let dragging = false;
+
+	divider.addEventListener( 'pointerdown', ( e ) => { dragging = true; divider.setPointerCapture( e.pointerId ); e.preventDefault(); } );
+	divider.addEventListener( 'pointermove', ( e ) => {
+
+		if ( ! dragging ) return;
+		const rect = app.getBoundingClientRect();
+		const panelW = document.getElementById( 'panel' ).offsetWidth;
+		const w = Math.max( 200, Math.min( e.clientX - rect.left, rect.width - panelW - 200 ) );
+		view.style.flex = `0 0 ${ w }px`;
+		resize();
+
+	} );
+	const stop = () => dragging = false;
+	divider.addEventListener( 'pointerup', stop );
+	divider.addEventListener( 'pointercancel', stop );
 
 }
 
@@ -285,27 +324,36 @@ async function openModel() {
 // load a model into the sidecar by path, show its proxy. Returns true on success.
 async function loadModelFromPath( path ) {
 
+	$( 'viewLoader' ).classList.add( 'on' );
 	outputContainer.innerText = 'Loading…';
-	let res;
 	try {
 
-		res = await fetch( `${ API }/load`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { path } ) } );
+		let res;
+		try {
 
-	} catch ( e ) {
+			res = await fetch( `${ API }/load`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify( { path } ) } );
 
-		outputContainer.innerText = `Sidecar unreachable — is it running? (${ e.message })`;
-		return false;
+		} catch ( e ) {
+
+			outputContainer.innerText = `Sidecar unreachable — is it running? (${ e.message })`;
+			return false;
+
+		}
+
+		if ( ! res.ok ) { outputContainer.innerText = `Load failed: ${ await res.text() }`; return false; }
+
+		const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
+		setModel( decodeProxy( await res.arrayBuffer() ) );
+		modelPath = path;
+		$( 'downloadSVG' ).disabled = true;
+		outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — position, then Generate projection`;
+		return true;
+
+	} finally {
+
+		$( 'viewLoader' ).classList.remove( 'on' );
 
 	}
-
-	if ( ! res.ok ) { outputContainer.innerText = `Load failed: ${ await res.text() }`; return false; }
-
-	const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
-	setModel( decodeProxy( await res.arrayBuffer() ) );
-	modelPath = path;
-	$( 'downloadSVG' ).disabled = true;
-	outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — position, then Generate projection`;
-	return true;
 
 }
 
@@ -364,6 +412,7 @@ async function generate() {
 
 	const btn = document.getElementById( 'regenerate' );
 	btn.disabled = true;
+	$( 'previewLoader' ).classList.add( 'on' );
 	outputContainer.innerText = 'Projecting…';
 
 	const q = viewportQuaternion();
@@ -376,6 +425,7 @@ async function generate() {
 				quaternion: [ q.x, q.y, q.z, q.w ],
 				angleThreshold: params.angleThreshold,
 				includeIntersectionEdges: params.includeIntersectionEdges,
+				smoothSilhouettes: params.smoothSilhouettes,
 				visibilityCull: params.visibilityCullMeshes,
 				simplifyBudget: params.decimate ? params.simplifyBudget : 0,
 				smooth: params.smooth,
@@ -396,6 +446,7 @@ async function generate() {
 	} finally {
 
 		btn.disabled = false;
+		$( 'previewLoader' ).classList.remove( 'on' );
 
 	}
 
@@ -805,7 +856,6 @@ function render() {
 
 	requestAnimationFrame( render );
 
-	if ( model ) model.visible = params.displayModel;
 	if ( needsRender ) { renderer.render( scene, camera ); needsRender = false; }
 
 	drawThrough.visible = params.displayDrawThroughProjection;

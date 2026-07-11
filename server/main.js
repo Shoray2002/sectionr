@@ -20,6 +20,7 @@ import { MeshoptDecoder } from "../node_modules/three/examples/jsm/libs/meshopt_
 import { makeDracoLoader } from "./draco.js";
 import { mergeVertices, mergeGeometries } from "../node_modules/three/examples/jsm/utils/BufferGeometryUtils.js";
 import { MeshoptSimplifier } from "meshoptimizer";
+import { smoothContourEdges } from "./contours.js";
 
 // three starts an internal rAF loop on init(); Deno has no rAF / DOM. Stub them.
 // Fire ASAP (not at 16ms): the projection's nextFrame() yields between every compute
@@ -28,10 +29,16 @@ import { MeshoptSimplifier } from "meshoptimizer";
 globalThis.requestAnimationFrame ??= (cb) => setTimeout(() => cb(performance.now()), 0);
 globalThis.cancelAnimationFrame ??= (id) => clearTimeout(id);
 
+// stdout/stderr can be a broken pipe when the sidecar is launched as a bundled
+// app (no tty / parent not draining the pipe); writes then throw EIO (os error 5).
+// Never let a log line abort a request.
+const log = ( ...a ) => { try { console.log( ...a ); } catch { /* ignore broken pipe */ } };
+const logErr = ( ...a ) => { try { console.error( ...a ); } catch { /* ignore broken pipe */ } };
+
 const PROXY_BUDGET = 200_000; // display proxy triangle budget
 
 if (!navigator.gpu) {
-  console.error("FATAL: navigator.gpu unavailable — run with --unstable-webgpu");
+  logErr("FATAL: navigator.gpu unavailable — run with --unstable-webgpu");
   Deno.exit(1);
 }
 
@@ -166,15 +173,17 @@ async function buildProjInput(budget, smooth) {
 
 // --- projection ------------------------------------------------------------
 
-async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0 } = {}) {
+async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0, smoothSilhouettes = false } = {}) {
   if (!fullRes) throw new Error("no model loaded");
 
   // pick projection input. budget=0 & smooth=0 -> project fullRes directly (avoids
   // an expensive weld of the full mesh). Otherwise build & cache a processed copy.
+  // smoothSilhouettes also needs the welded copy: interpolated contours require
+  // smooth vertex normals, which only exist on welded geometry.
   const budget = simplifyBudget > 0 ? simplifyBudget : 0;
   smooth = smooth | 0;
   let target = fullRes;
-  if (budget > 0 || smooth > 0) {
+  if (budget > 0 || smooth > 0 || smoothSilhouettes) {
     if (!projCache || projCache.budget !== budget || projCache.smooth !== smooth) {
       disposeObject(projCache?.pivot);
       projCache = { budget, smooth, pivot: await buildProjInput(budget, smooth) };
@@ -191,10 +200,26 @@ async function project(quat, { angleThreshold = 50, includeIntersectionEdges = f
   gen.angleThreshold = angleThreshold;
   gen.batchSize = 1_000_000; // fewer GPU jobs/readbacks than the 100k default
 
+  // the visibility epsilon must scale with the model: the library default is
+  // absolute (5e-5), which is ~zero for a car exported in millimeters and makes
+  // every on-surface edge's occlusion test degenerate (dashed/flickering lines).
+  const diag = new THREE.Box3().setFromObject(target).getSize(new THREE.Vector3()).length();
+  gen.yOffset = Math.max(5e-5, diag * 2e-5);
+
   // optionally drop meshes/faces not visible from the projection direction
   const input = visibilityCull ? await new MeshVisibilityCuller(renderer, { pixelsPerMeter: 0.1 }).cull(target) : target;
 
-  const result = await gen.generate(input, { onProgress: () => {} });
+  // swap jagged mesh-edge silhouettes for interpolated smooth contours (crease
+  // and boundary edges are unaffected). Extracted from the pre-cull target: culled
+  // geometry is invisible from the projection direction, so it can't occlude.
+  let extraEdges = null;
+  if (smoothSilhouettes) {
+    gen.silhouetteEdges = false;
+    extraEdges = [];
+    target.traverse((o) => { if (o.isMesh) smoothContourEdges(o, { yOffset: gen.yOffset, creaseAngle: angleThreshold, target: extraEdges }); });
+  }
+
+  const result = await gen.generate(input, { onProgress: () => {}, extraEdges });
   return {
     vis: result.visibleEdges.getLineGeometry().attributes.position.array,
     hid: result.hiddenEdges.getLineGeometry().attributes.position.array,
@@ -228,7 +253,7 @@ function packProject(vis, hid) {
 const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" };
 const port = Number(Deno.args[0]) || 8787;
 
-Deno.serve({ port, hostname: "127.0.0.1", onListen: () => console.log(`sectionr sidecar on http://127.0.0.1:${port}`) }, async (req) => {
+Deno.serve({ port, hostname: "127.0.0.1", onListen: () => log(`sectionr sidecar on http://127.0.0.1:${port}`) }, async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   const { pathname } = new URL(req.url);
   try {
@@ -253,7 +278,7 @@ Deno.serve({ port, hostname: "127.0.0.1", onListen: () => console.log(`sectionr 
       const tris = triangleCount(fullRes);
       const proxy = await buildProxy(fullRes);
       const ms = (performance.now() - t0).toFixed(0);
-      console.log(`loaded ${path} — ${tris.toLocaleString()} tris, proxy ${proxy.index.count / 3 | 0} tris (${ms}ms)`);
+      log(`loaded ${path} — ${tris.toLocaleString()} tris, proxy ${proxy.index.count / 3 | 0} tris (${ms}ms)`);
       return new Response(packProxy(proxy), { headers: { ...CORS, "Content-Type": "application/octet-stream", "X-Full-Tris": String(tris) } });
     }
 
@@ -261,13 +286,13 @@ Deno.serve({ port, hostname: "127.0.0.1", onListen: () => console.log(`sectionr 
       const body = await req.json();
       const t0 = performance.now();
       const { vis, hid } = await project(body.quaternion ?? [0, 0, 0, 1], body);
-      console.log(`projected — ${vis.length / 6 | 0} vis + ${hid.length / 6 | 0} hidden segs (${(performance.now() - t0).toFixed(0)}ms)`);
+      log(`projected — ${vis.length / 6 | 0} vis + ${hid.length / 6 | 0} hidden segs (${(performance.now() - t0).toFixed(0)}ms)`);
       return new Response(packProject(vis, hid), { headers: { ...CORS, "Content-Type": "application/octet-stream" } });
     }
 
     return new Response("not found", { status: 404, headers: CORS });
   } catch (e) {
-    console.error(e);
+    logErr(e);
     return new Response(String(e?.stack || e), { status: 500, headers: CORS });
   }
 });

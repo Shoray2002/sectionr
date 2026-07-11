@@ -1,8 +1,53 @@
+diff --git a/node_modules/three-edge-projection/src/EdgeGenerator.js b/node_modules/three-edge-projection/src/EdgeGenerator.js
+index 60318ac..4daf75b 100644
+--- a/node_modules/three-edge-projection/src/EdgeGenerator.js
++++ b/node_modules/three-edge-projection/src/EdgeGenerator.js
+@@ -20,6 +20,7 @@ export class EdgeGenerator {
+ 		this.thresholdAngle = 50;
+ 		this.iterationTime = 30;
+ 		this.yOffset = 1e-6;
++		this.silhouetteEdges = true;
+ 
+ 	}
+ 
+@@ -66,7 +67,7 @@ export class EdgeGenerator {
+ 
+ 		}
+ 
+-		const { projectionDirection, thresholdAngle, iterationTime, yOffset } = this;
++		const { projectionDirection, thresholdAngle, iterationTime, yOffset, silhouetteEdges } = this;
+ 		if ( geometry.isObject3D ) {
+ 
+ 			const meshes = getAllMeshes( geometry );
+@@ -85,6 +86,7 @@ export class EdgeGenerator {
+ 					matrix: mesh.matrixWorld,
+ 					thresholdAngle: thresholdAngle,
+ 					iterationTime: iterationTime,
++					silhouetteEdges: silhouetteEdges,
+ 				} );
+ 
+ 				transformEdges( results, mesh.matrixWorld, yOffset );
+@@ -107,6 +109,7 @@ export class EdgeGenerator {
+ 				projectionDirection: projectionDirection,
+ 				thresholdAngle: thresholdAngle,
+ 				iterationTime: iterationTime,
++				silhouetteEdges: silhouetteEdges,
+ 			} );
+ 
+ 		}
 diff --git a/node_modules/three-edge-projection/src/utils/generateEdges.js b/node_modules/three-edge-projection/src/utils/generateEdges.js
-index 3c7fc58..19b4500 100644
+index 3c7fc58..b08de15 100644
 --- a/node_modules/three-edge-projection/src/utils/generateEdges.js
 +++ b/node_modules/three-edge-projection/src/utils/generateEdges.js
-@@ -52,7 +52,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -18,6 +18,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+ 		matrix = null,
+ 		thresholdAngle = 1,
+ 		iterationTime = 30,
++		silhouetteEdges = true,
+ 	} = options;
+ 
+ 	_localProjection.copy( UP_VECTOR );
+@@ -52,7 +53,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  	const vertKeys = [ 'a', 'b', 'c' ];
  	const hashes = new Array( 3 );
  
@@ -11,7 +56,7 @@ index 3c7fc58..19b4500 100644
  	let time = performance.now();
  	for ( let i = 0; i < indexCount; i += 3 ) {
  
-@@ -123,11 +123,12 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -123,11 +124,12 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  			const hash = `${ vecHash0 }_${ vecHash1 }`;
  			const reverseHash = `${ vecHash1 }_${ vecHash0 }`;
  
@@ -26,7 +71,16 @@ index 3c7fc58..19b4500 100644
  				const meetsThreshold = _normal.dot( otherNormal ) <= thresholdDot;
  
  				// get the dot product relative to the projection angle and
-@@ -150,18 +151,18 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -141,7 +143,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+ 
+ 				const projectionThreshold = Math.sign( normDot ) !== Math.sign( otherDot );
+ 
+-				if ( meetsThreshold || projectionThreshold ) {
++				if ( meetsThreshold || ( silhouetteEdges && projectionThreshold ) ) {
+ 
+ 					const line = new ProjectionEdge();
+ 					line.start.copy( v0 );
+@@ -150,18 +152,18 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  
  				}
  
@@ -49,7 +103,7 @@ index 3c7fc58..19b4500 100644
  
  			}
  
-@@ -170,11 +171,11 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -170,11 +172,11 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  	}
  
  	// iterate over all remaining, unmatched edges and add them to the vertex array
@@ -64,3 +118,76 @@ index 3c7fc58..19b4500 100644
  			_v0.fromBufferAttribute( positionAttr, index0 );
  			_v1.fromBufferAttribute( positionAttr, index1 );
  
+diff --git a/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js b/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js
+index 922a63d..3dad869 100644
+--- a/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js
++++ b/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js
+@@ -73,6 +73,24 @@ export class ProjectionGenerator {
+ 		 */
+ 		this.parallelJobs = 3;
+ 
++		/**
++		 * Whether to generate silhouette edges from mesh edges whose adjacent face
++		 * normals straddle the projection direction. Disable when supplying smooth
++		 * interpolated contours via `options.extraEdges` instead.
++		 * @type {boolean}
++		 * @default true
++		 */
++		this.silhouetteEdges = true;
++
++		/**
++		 * Offset applied to edges along the projection axis to account for floating
++		 * point error in edge processing and intersections. Should be set relative to
++		 * the scale of the scene (e.g. a small fraction of its bounding box size).
++		 * @type {number}
++		 * @default 5e-5
++		 */
++		this.yOffset = 5 * 1e-5;
++
+ 	}
+ 
+ 	/**
+@@ -85,8 +103,8 @@ export class ProjectionGenerator {
+ 	 */
+ 	async generate( scene, options = {} ) {
+ 
+-		const { renderer, angleThreshold, includeIntersectionEdges, batchSize, iterationTime, parallelJobs } = this;
+-		const { onProgress = null, signal = null } = options;
++		const { renderer, angleThreshold, includeIntersectionEdges, batchSize, iterationTime, parallelJobs, silhouetteEdges, yOffset } = this;
++		const { onProgress = null, signal = null, extraEdges = null } = options;
+ 
+ 		// collect meshes
+ 		const meshes = getAllMeshes( scene );
+@@ -95,11 +113,10 @@ export class ProjectionGenerator {
+ 		const edgeGenerator = new EdgeGenerator();
+ 		edgeGenerator.thresholdAngle = angleThreshold;
+ 		edgeGenerator.iterationTime = iterationTime;
++		edgeGenerator.silhouetteEdges = silhouetteEdges;
+ 
+ 		// adjust the offset to account for floating point error in the edge processing and intersections.
+-		// NOTE: Ideally we should be applying this relative to the scale of the values being used rather that
+-		// using a fixed offset.
+-		edgeGenerator.yOffset = 5 * 1e-5;
++		edgeGenerator.yOffset = yOffset;
+ 
+ 		if ( onProgress ) {
+ 
+@@ -124,6 +141,18 @@ export class ProjectionGenerator {
+ 
+ 		}
+ 
++		if ( extraEdges ) {
++
++			// caller-supplied edges (e.g. interpolated smooth contours) go through the
++			// same degenerate filter and visibility pipeline as generated edges
++			for ( let i = 0; i < extraEdges.length; i ++ ) {
++
++				edges.push( extraEdges[ i ] );
++
++			}
++
++		}
++
+ 		edges = edges.filter( e => ! isYProjectedLineDegenerate( e ) );
+ 
+ 		if ( edges.length === 0 ) {
