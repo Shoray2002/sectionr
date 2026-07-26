@@ -10,6 +10,10 @@
 //                             returns a decimated display proxy (binary geometry)
 //   POST /project {quaternion:[x,y,z,w], angleThreshold, includeIntersectionEdges}
 //                          -> applies orientation, projects, returns line segments (binary)
+//   GET  /gfont?family=X   -> full TTF bytes for a Google Font (the webview can't:
+//                             browsers get subsetted woff2, which opentype.js can't parse)
+//   POST /overpass (body = Overpass QL) -> OSM JSON, tried against public
+//                             mirrors (browser fetches get flaky 406s from overpass-api.de)
 
 import * as THREE from "three/webgpu";
 import { ProjectionGenerator, MeshVisibilityCuller } from "three-edge-projection/webgpu";
@@ -250,14 +254,88 @@ function packProject(vis, hid) {
 
 // --- server ----------------------------------------------------------------
 
-const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*" };
+const CORS = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "*", "Access-Control-Allow-Methods": "*", "Access-Control-Expose-Headers": "*" };
 const port = Number(Deno.args[0]) || 8787;
 
 Deno.serve({ port, hostname: "127.0.0.1", onListen: () => log(`sectionr sidecar on http://127.0.0.1:${port}`) }, async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
-  const { pathname } = new URL(req.url);
+  const { pathname, searchParams } = new URL(req.url);
   try {
     if (pathname === "/health") return new Response("ok", { headers: CORS });
+
+    if (pathname === "/gfont") {
+      const family = searchParams.get("family") ?? "";
+      // a plain UA makes Google serve one full-coverage TTF instead of subsetted woff2
+      const css = await fetch(`https://fonts.googleapis.com/css2?family=${encodeURIComponent(family).replace(/%20/g, "+")}`, { headers: { "User-Agent": "curl/8" } });
+      if (!css.ok) return new Response("not found on Google Fonts", { status: 404, headers: CORS });
+      const url = (await css.text()).match(/url\((https:[^)]+)\)/)?.[1];
+      if (!url) return new Response("no font url in css", { status: 502, headers: CORS });
+      return new Response(await (await fetch(url)).arrayBuffer(), { headers: { ...CORS, "Content-Type": "font/ttf" } });
+    }
+
+    if (pathname === "/overpass" && req.method === "POST") {
+      // proxy for the map tab: overpass-api.de's gateways intermittently 406
+      // browser fetches (bot filtering) and public mirrors 504 under load, so
+      // query from here with a clean UA, cycling mirrors over two rounds.
+      // Streamed 200 with whitespace heartbeats (valid leading JSON) — the
+      // webview kills responses silent for ~60s, and slow mirrors take longer.
+      // On total failure the body is {"error": ...}; the frontend checks it.
+      // Successful responses are cached on disk keyed by the query hash, so
+      // the same frame re-fetches instantly and survives app restarts.
+      // ponytail: no eviction — a few MB per area, clear ~/.cache/sectionr by hand
+      const query = await req.text();
+      const dir = `${Deno.env.get("HOME") ?? "."}/.cache/sectionr`;
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(query));
+      const file = `${dir}/overpass-${[...new Uint8Array(digest)].slice(0, 12).map((b) => b.toString(16).padStart(2, "0")).join("")}.json`;
+      try {
+        return new Response(await Deno.readFile(file), { headers: { ...CORS, "Content-Type": "application/json", "X-Cache": "hit" } });
+      } catch { /* miss */ }
+      const MIRRORS = [
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+        "https://overpass.private.coffee/api/interpreter",
+        "https://overpass-api.de/api/interpreter",
+        "https://overpass.kumi.systems/api/interpreter",
+      ];
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(c) {
+          const hb = setInterval(() => { try { c.enqueue(enc.encode(" ")); } catch { clearInterval(hb); } }, 10_000);
+          const errs = [];
+          try {
+            for (let round = 0; round < 2; round++) for (const base of MIRRORS) {
+              try {
+                // bound the wait for headers, not the transfer — aborting a
+                // slow 16MB body mid-pipe would corrupt the client's JSON
+                const ctl = new AbortController();
+                const ttfb = setTimeout(() => ctl.abort(new DOMException("no response in 60s", "TimeoutError")), 60_000);
+                const res = await fetch(base, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "sectionr/0.1 (plotted.shop poster tool)" },
+                  body: "data=" + encodeURIComponent(query),
+                  signal: ctl.signal,
+                }).finally(() => clearTimeout(ttfb));
+                if (!res.ok) {
+                  await res.body?.cancel();
+                  errs.push(`${new URL(base).host} ${res.status}`);
+                  continue;
+                }
+                clearInterval(hb);
+                const chunks = [];
+                for await (const chunk of res.body) { chunks.push(chunk); c.enqueue(chunk); }
+                c.close();
+                await Deno.mkdir(dir, { recursive: true });
+                await Deno.writeFile(file, new Uint8Array(await new Blob(chunks).arrayBuffer()));
+                return;
+              } catch (e) { errs.push(`${new URL(base).host} ${e?.message ?? e}`); }
+            }
+            c.enqueue(enc.encode(JSON.stringify({ error: "all Overpass mirrors failed: " + errs.join(", ") })));
+          } catch { /* client hung up mid-stream */ }
+          clearInterval(hb);
+          try { c.close(); } catch { /* already closed */ }
+        },
+      });
+      return new Response(stream, { headers: { ...CORS, "Content-Type": "application/json", "X-Cache": "miss" } });
+    }
 
     if (pathname === "/load" && req.method === "POST") {
       const { path } = await req.json();

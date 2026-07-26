@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>sectionr</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; background: #141414; color: #e5e7eb; }
@@ -15,6 +14,13 @@
     #tabs button.on { background: #262626; color: #e5e7eb; }
     #app { display: flex; flex: 1; min-height: 0; }
     #assets { display: none; flex: 1; min-height: 0; }
+    #maptab { display: none; flex: 1; min-height: 0; }
+    #mapWrap { flex: 1; position: relative; min-width: 0; overflow: hidden; }
+    #map { width: 100%; height: 100%; background: #0d0d0d; }
+    #mapFrame { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); height: 92%; max-width: 92%; aspect-ratio: 1 / 1.4142; border: 1px solid #f80; box-shadow: 0 0 0 100vmax rgba(0,0,0,.45); pointer-events: none; z-index: 800; }
+    #mapPreview { flex: 1; min-width: 0; background: #0d0d0d; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; border-left: 1px solid #2a2a2a; }
+    #mapPreview svg { height: 94%; width: auto; }
+    #mapStatus { margin-top: 14px; color: #9ca3af; font-size: 12px; min-height: 16px; }
     #assetsPreview { flex: 1; overflow: auto; background: #0d0d0d; padding: 32px; min-width: 0; }
     .assetLabel { font-size: 11px; color: #6b7280; margin: 0 0 8px; }
     #tablePreview { margin-bottom: 32px; }
@@ -43,6 +49,7 @@
     .row { display: flex; align-items: center; justify-content: space-between; margin: 7px 0; }
     .row input[type=color] { width: 40px; height: 22px; padding: 0; border: 1px solid #3a3a3a; border-radius: 4px; background: none; cursor: pointer; }
     .row select { background: #262626; color: #e5e7eb; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; font-size: 12px; cursor: pointer; }
+    .row button { width: auto; margin: 0; padding: 4px 12px; }
     button {
       width: 100%; padding: 9px; margin-top: 8px; cursor: pointer;
       border: 1px solid #3a3a3a; border-radius: 6px; background: #262626; color: #e5e7eb; font-size: 13px;
@@ -62,6 +69,7 @@
   <div id="tabs">
     <button data-tab="app" class="on">section</button>
     <button data-tab="assets">assets</button>
+    <button data-tab="maptab">map</button>
   </div>
   <div id="app">
     <div id="view"><div class="tag">drag to position · scroll to zoom</div><div id="viewLoader" class="loader"></div></div>
@@ -163,6 +171,13 @@
     <div id="assetsPanel" class="panel">
       <h1>assets</h1>
 
+      <h2>Font</h2>
+      <div class="row"><label for="fontSel">Family</label><select id="fontSel" style="max-width:170px"><option>Space Mono</option></select></div>
+      <div class="row" style="gap:6px"><input id="gfName" type="text" style="flex:1" placeholder="Google font name"><button id="gfLoad">Load</button></div>
+      <button id="fontUpload">Upload font file…</button>
+      <input id="fontFile" type="file" accept=".ttf,.otf,.woff" style="display:none">
+      <p class="hint">Text exports as outlined paths — renders identically anywhere, no font install needed.</p>
+
       <h2>Table</h2>
       <div class="row"><label for="tblWidth">Width (mm)</label><input id="tblWidth" type="number" value="120" step="1" min="1"></div>
       <div class="row"><label for="tblRows">Rows</label><input id="tblRows" type="number" value="5" min="1"></div>
@@ -195,7 +210,45 @@ Jeffery Schumm | Jeffery.Schumm@yahoo.com</textarea>
       <div id="assetsStatus"></div>
     </div>
   </div>
+  <div id="maptab">
+    <div id="mapWrap">
+      <div id="map"></div>
+      <div id="mapFrame"></div>
+    </div>
+    <div id="mapPreview"><div class="tag">fetch an area to preview</div></div>
+    <div id="mapPanel" class="panel">
+      <h1>map poster</h1>
+
+      <div class="row" style="gap:6px"><input id="mapPlace" type="text" style="flex:1" placeholder="Search place"><button id="mapSearch">Go</button></div>
+      <p class="hint">Pan &amp; zoom until the frame covers your area — everything inside it exports at 1:1.4142 (A-series).</p>
+      <button id="mapFetch" class="primary">Fetch area</button>
+
+      <h2>Style</h2>
+      <div class="row"><label for="mapTheme">Theme</label><select id="mapTheme"><option>noir</option><option>paper</option><option>blueprint</option></select></div>
+      <div class="row"><label for="mapWidth">Width (mm)</label><input id="mapWidth" type="number" value="210" step="1" min="10"></div>
+      <div class="check"><input id="mBg" type="checkbox" checked><label for="mBg">Background fill</label></div>
+
+      <h2>Layers</h2>
+      <div id="mapLayers"></div>
+      <p class="hint">Stroke widths in mm.</p>
+      <div class="row"><label for="mMinLen">Min line (mm)</label><input id="mMinLen" type="number" value="1" step="0.25" min="0"></div>
+      <div class="row"><label for="mSimplify">Simplify (mm)</label><input id="mSimplify" type="number" value="0.1" step="0.05" min="0"></div>
+      <p class="hint">Min line prunes residential/service/path stubs only (majors stay intact); simplify thins points closer than this — both cut plot time.</p>
+      <div class="check"><input id="mWater" type="checkbox" checked><label for="mWater">Water</label></div>
+      <div class="check"><input id="mParks" type="checkbox" checked><label for="mParks">Parks</label></div>
+
+      <h2>Footer</h2>
+      <div class="check"><input id="mFooter" type="checkbox" checked><label for="mFooter">Title &amp; coordinates</label></div>
+      <div class="row"><label for="mapTitle">Title</label><input id="mapTitle" type="text" value="London"></div>
+      <div class="row"><label for="mapSubtitle">Subtitle</label><input id="mapSubtitle" type="text" value="United Kingdom"></div>
+
+      <h2>Export</h2>
+      <button id="mapExport" class="primary">Export map SVG</button>
+      <div id="mapStatus"></div>
+    </div>
+  </div>
     <script type="module" src="/main.js"></script>
     <script type="module" src="/assets.js"></script>
+    <script type="module" src="/map.js"></script>
 </body>
 </html>

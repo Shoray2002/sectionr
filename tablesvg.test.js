@@ -17,5 +17,23 @@ const txt = buildTextSVG( { text: 'ab\ncdef', fontSize: 10, lineHeight: 1.2, col
 assert( txt.includes( 'width="24mm"' ) );          // 4 chars * 0.6em * 10mm
 assert( txt.includes( 'height="22.5mm"' ) );       // 1 gap * 12 + 10.5
 assert( txt.match( /<text/g ).length === 2 );
+assert( txt.includes( `font-family="'Space Mono'"` ) );
+
+// custom font + proportional measure override
+const inter = buildTextSVG( { text: 'ab', fontSize: 10, lineHeight: 1.2, color: '#fff', font: 'Inter', measure: () => 42 } );
+assert( inter.includes( `font-family="'Inter'"` ) );
+assert( inter.includes( 'width="42mm"' ) );
+
+// pathify: text becomes outlined paths, no <text> elements
+const outlined = buildTextSVG( { text: 'ab', fontSize: 10, lineHeight: 1.2, color: '#fff', measure: () => 42, pathify: ( t, x, y ) => `M${ x } ${ y }h5` } );
+assert( outlined.includes( '<path d="M0 8h5"' ) );      // baseline at 0.8em
+assert( ! outlined.includes( '<text' ) );
+const outTbl = buildTableSVG( {
+	width: 100, rows: 1, cols: 1, rowHeight: 10, fontSize: 3, pad: 2,
+	weights: [ 1 ], cells: [ [ 'a' ] ], horizontal: false, vertical: false, border: false,
+	color: '#fff', strokeWidth: 0.3, pathify: ( t, x, y ) => `M${ x } ${ y }h5`,
+} );
+assert( outTbl.includes( '<path d="M2 6.05h5"' ) );     // x=pad, y=rowMid+0.35em
+assert( ! outTbl.includes( '<text' ) );
 
 console.log( 'ok' );
