@@ -4,4 +4,5 @@
 .claude
 node_modules
 dist
-Models
+src-tauri/binaries
+src-tauri/target

@@ -4,10 +4,20 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>sectionr</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; background: #141414; color: #e5e7eb; }
-    #app { display: flex; height: 100%; }
+    body { display: flex; flex-direction: column; }
+    #tabs { display: flex; gap: 6px; padding: 6px 10px 0; background: #0d0d0d; border-bottom: 1px solid #2a2a2a; }
+    #tabs button { width: auto; margin: 0; padding: 5px 16px; font-size: 12px; border-radius: 6px 6px 0 0; border-bottom: none; background: #1b1b1b; color: #6b7280; }
+    #tabs button.on { background: #262626; color: #e5e7eb; }
+    #app { display: flex; flex: 1; min-height: 0; }
+    #assets { display: none; flex: 1; min-height: 0; }
+    #assetsPreview { flex: 1; overflow: auto; background: #0d0d0d; padding: 32px; min-width: 0; }
+    .assetLabel { font-size: 11px; color: #6b7280; margin: 0 0 8px; }
+    #tablePreview { margin-bottom: 32px; }
     #view { flex: 1; position: relative; background: #141414; min-width: 0; cursor: grab; }
     #view:active { cursor: grabbing; }
     #preview { flex: 1; position: relative; background: #0d0d0d; min-width: 0; }
@@ -19,12 +29,14 @@
     .loader.on { display: flex; }
     .loader::after { content: ''; width: 42px; height: 42px; border: 4px solid rgba(128,128,128,.25); border-top-color: #888; border-radius: 50%; animation: spin .8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
-    #panel {
+    .panel {
       width: 300px; padding: 16px; overflow-y: auto;
       border-left: 1px solid #2a2a2a; background: #1b1b1b; font-size: 13px; color: #e5e7eb;
     }
-    #panel h1 { font-size: 15px; margin: 0 0 14px; }
-    #panel h2 { font-size: 11px; text-transform: uppercase; color: #6b7280; margin: 20px 0 8px; letter-spacing: .05em; }
+    .panel h1 { font-size: 15px; margin: 0 0 14px; }
+    .panel h2 { font-size: 11px; text-transform: uppercase; color: #6b7280; margin: 20px 0 8px; letter-spacing: .05em; }
+    .panel input[type=number], .panel input[type=text] { width: 90px; background: #262626; color: #e5e7eb; border: 1px solid #3a3a3a; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+    .panel textarea { width: 100%; margin-top: 6px; background: #262626; color: #e5e7eb; border: 1px solid #3a3a3a; border-radius: 4px; padding: 6px; font-size: 12px; font-family: 'Space Mono', ui-monospace, monospace; resize: vertical; }
     .check { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
     .check input { margin: 0; width: 14px; height: 14px; accent-color: #e5e7eb; }
     .check label { margin: 0; cursor: pointer; }
@@ -42,16 +54,20 @@
     .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
     .grid3 button { margin-top: 0; padding: 7px; }
     #file { display: none; }
-    #status { margin-top: 14px; color: #9ca3af; font-size: 12px; min-height: 16px; }
+    #status, #assetsStatus { margin-top: 14px; color: #9ca3af; font-size: 12px; min-height: 16px; }
     .hint { color: #6b7280; font-size: 11px; margin: 4px 0 0; }
   </style>
 </head>
 <body>
+  <div id="tabs">
+    <button data-tab="app" class="on">section</button>
+    <button data-tab="assets">assets</button>
+  </div>
   <div id="app">
     <div id="view"><div class="tag">drag to position · scroll to zoom</div><div id="viewLoader" class="loader"></div></div>
     <div id="divider"></div>
     <div id="preview"><div class="tag">projection preview</div><div id="previewLoader" class="loader"></div></div>
-    <div id="panel">
+    <div id="panel" class="panel">
       <h1>sectionr</h1>
 
       <button id="open" class="primary">Open model</button>
@@ -137,6 +153,49 @@
       <div id="output"></div>
     </div>
   </div>
+  <div id="assets">
+    <div id="assetsPreview">
+      <div class="assetLabel">table</div>
+      <div id="tablePreview"></div>
+      <div class="assetLabel">text</div>
+      <div id="textPreview"></div>
+    </div>
+    <div id="assetsPanel" class="panel">
+      <h1>assets</h1>
+
+      <h2>Table</h2>
+      <div class="row"><label for="tblWidth">Width (mm)</label><input id="tblWidth" type="number" value="120" step="1" min="1"></div>
+      <div class="row"><label for="tblRows">Rows</label><input id="tblRows" type="number" value="5" min="1"></div>
+      <div class="row"><label for="tblCols">Columns</label><input id="tblCols" type="number" value="2" min="1"></div>
+      <div class="row"><label for="tblColW">Column widths</label><input id="tblColW" type="text" value="1, 1.6"></div>
+      <p class="hint">Relative weights, comma-separated — one per column.</p>
+      <div class="row"><label for="tblRowH">Row height (mm)</label><input id="tblRowH" type="number" value="8" step="0.5" min="1"></div>
+      <div class="row"><label for="tblFont">Font size (mm)</label><input id="tblFont" type="number" value="3" step="0.25" min="0.5"></div>
+      <div class="row"><label for="tblPad">Cell padding (mm)</label><input id="tblPad" type="number" value="2" step="0.5" min="0"></div>
+      <div class="row"><label for="tblStroke">Stroke (mm)</label><input id="tblStroke" type="number" value="0.3" step="0.05" min="0.05"></div>
+      <div class="row"><label for="tblColor">Colour</label><input id="tblColor" type="color" value="#ffffff"></div>
+      <div class="check"><input id="tblH" type="checkbox" checked><label for="tblH">Horizontal lines</label></div>
+      <div class="check"><input id="tblV" type="checkbox"><label for="tblV">Vertical lines</label></div>
+      <div class="check"><input id="tblBorder" type="checkbox"><label for="tblBorder">Outer border</label></div>
+      <textarea id="tblText" rows="6">Jacquelyn Corkery | Jacquelyn_Corkery35@yahoo.com
+Frances Rau | Frances_Rau@hotmail.com
+Kimberly Gottlieb | Kimberly.Gottlieb@hotmail.com
+Myra Carroll | Myra13@gmail.com
+Jeffery Schumm | Jeffery.Schumm@yahoo.com</textarea>
+      <p class="hint">One line per row, cells split by |.</p>
+      <button id="tblExport" class="primary">Export table SVG</button>
+
+      <h2>Text</h2>
+      <textarea id="txtText" rows="3">plotted.shop</textarea>
+      <div class="row"><label for="txtFont">Font size (mm)</label><input id="txtFont" type="number" value="8" step="0.5" min="0.5"></div>
+      <div class="row"><label for="txtLH">Line height (×)</label><input id="txtLH" type="number" value="1.2" step="0.1" min="0.5"></div>
+      <div class="row"><label for="txtColor">Colour</label><input id="txtColor" type="color" value="#ffffff"></div>
+      <button id="txtExport" class="primary">Export text SVG</button>
+
+      <div id="assetsStatus"></div>
+    </div>
+  </div>
     <script type="module" src="/main.js"></script>
+    <script type="module" src="/assets.js"></script>
 </body>
 </html>

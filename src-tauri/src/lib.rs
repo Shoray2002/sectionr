@@ -16,23 +16,38 @@ fn read_file(path: String) -> Result<String, String> {
 }
 
 fn spawn_sidecar() -> std::io::Result<Child> {
-    // project root = parent of src-tauri (dev). server/main.js + deno.json live here.
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    if cfg!(debug_assertions) {
+        // dev: run from the repo with system deno. server/main.js + deno.json live here.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
 
-    std::process::Command::new("deno")
-        .current_dir(&root)
-        .args([
-            "run",
-            "-A",
-            "--unstable-webgpu",
-            "--v8-flags=--max-old-space-size=12000",
-            "server/main.js",
-            "8787",
-        ])
-        .spawn()
+        std::process::Command::new("deno")
+            .current_dir(&root)
+            .args([
+                "run",
+                "-A",
+                "--unstable-webgpu",
+                "--v8-flags=--max-old-space-size=12000",
+                "server/main.js",
+                "8787",
+            ])
+            .spawn()
+    } else {
+        // release: `deno compile`d sidecar bundled via externalBin, sits next to
+        // the app executable in Contents/MacOS. v8 flags can't be baked into the
+        // compiled binary, so pass them through Deno's env var instead.
+        let bin = std::env::current_exe()?
+            .parent()
+            .unwrap()
+            .join("sectionr-sidecar");
+
+        std::process::Command::new(bin)
+            .env("DENO_V8_FLAGS", "--max-old-space-size=12000")
+            .arg("8787")
+            .spawn()
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
