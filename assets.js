@@ -5,6 +5,9 @@ import { save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import * as opentypeNS from 'opentype.js';
 import { buildTableSVG, buildTextSVG } from './tablesvg.js';
+import { outline, advance, centerlineText } from './centerline.js';
+
+export { outline, advance }; // map.js pulls these alongside otFonts
 
 const opentype = opentypeNS.default ?? opentypeNS;
 const API = 'http://127.0.0.1:8787';
@@ -26,49 +29,15 @@ tabs.forEach( ( btn ) => btn.addEventListener( 'click', () => {
 const fontSel = $( 'fontSel' );
 export const otFonts = {}; // family -> opentype.Font (map tab reads Space Mono from here)
 
-// glyph-by-glyph with kerning, bypassing opentype's GSUB feature pipeline
-// (font.getPath crashes on some fonts' ccmp tables, e.g. Space Mono)
-export function outline( font, text, fs, x, y ) {
-
-	const scale = fs / font.unitsPerEm;
-	let d = '', prev = null;
-	for ( const ch of text ) {
-
-		const g = font.charToGlyph( ch );
-		if ( prev ) x += font.getKerningValue( prev, g ) * scale;
-		d += g.getPath( x, y, fs ).toPathData( 3 );
-		x += g.advanceWidth * scale;
-		prev = g;
-
-	}
-
-	return d;
-
-}
-
-export function advance( font, text, fs ) {
-
-	const scale = fs / font.unitsPerEm;
-	let w = 0, prev = null;
-	for ( const ch of text ) {
-
-		const g = font.charToGlyph( ch );
-		if ( prev ) w += font.getKerningValue( prev, g ) * scale;
-		w += g.advanceWidth * scale;
-		prev = g;
-
-	}
-
-	return w;
-
-}
-
 // per-call pathify/measure closures for the builders (undefined until the
-// selected family has loaded — builders then fall back to <text>)
+// selected family has loaded — builders then fall back to <text>). With
+// "single-line text" on, glyphs become stroked centerlines instead of fills.
 function pathify( fs ) {
 
 	const font = otFonts[ fontSel.value ];
-	return font && ( ( t, x, y ) => outline( font, t, fs, x, y ) );
+	if ( ! font ) return undefined;
+	if ( $( 'plotText' ).checked ) return ( t, x, y ) => centerlineText( font, fontSel.value, t, fs, x, y );
+	return ( t, x, y ) => outline( font, t, fs, x, y );
 
 }
 
@@ -153,6 +122,7 @@ function tableOpts() {
 		border: $( 'tblBorder' ).checked,
 		color: $( 'tblColor' ).value,
 		strokeWidth: + $( 'tblStroke' ).value || 0.3,
+		textStroke: $( 'plotText' ).checked ? + $( 'tblStroke' ).value || 0.3 : 0,
 	};
 
 }
@@ -168,6 +138,7 @@ function textOpts() {
 		font: fontSel.value,
 		pathify: pathify( fontSize ),
 		measure: measure( fontSize ),
+		textStroke: $( 'plotText' ).checked ? + $( 'txtStroke' ).value || 0.3 : 0,
 	};
 
 }

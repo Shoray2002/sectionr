@@ -2,8 +2,11 @@
 // Overpass, style it maptoposter-style, export as a print-ready poster SVG.
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { save } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import { buildMapSVG, stitchRings, ROAD_CLASSES } from './mapsvg.js';
-import { exportSVG, otFonts, outline, advance } from './assets.js';
+import { outline, advance, centerlineText } from './centerline.js';
+import { otFonts } from './assets.js';
 
 const $ = ( id ) => document.getElementById( id );
 const API = 'http://127.0.0.1:8787';
@@ -139,14 +142,51 @@ function opts() {
 		minLen: + $( 'mMinLen' ).value || 0,
 		simplify: + $( 'mSimplify' ).value || 0,
 		footer: $( 'mFooter' ).checked ? { title: $( 'mapTitle' ).value, subtitle: $( 'mapSubtitle' ).value } : null,
-		textPath: font && ( ( t, x, y, fs ) => outline( font, t, fs, x, y ) ),
+		textPath: font && ( $( 'mSingle' ).checked
+			? ( t, x, y, fs ) => centerlineText( font, 'Space Mono', t, fs, x, y )
+			: ( t, x, y, fs ) => outline( font, t, fs, x, y ) ),
 		textWidth: font && ( ( t, fs ) => advance( font, t, fs ) ),
+		textStroke: $( 'mSingle' ).checked ? 0.3 : 0, // matches the divider stroke
 	};
 
 }
 
 function render() { if ( data ) $( 'mapPreview' ).innerHTML = buildMapSVG( opts() ); }
 
+// one svg per active layer (separate pen passes) plus the combined poster —
+// every file shares the same viewBox/projection, so they stack in register.
+// Per-layer files skip the background; the combined one keeps it.
+function layerSVGs() {
+
+	const o = opts();
+	const off = Object.fromEntries( ROAD_CLASSES.map( k => [ k, false ] ) );
+	const bare = { ...o, roadOn: off, showWater: false, showParks: false, showBg: false, footer: null, footerSpace: !! o.footer };
+	const files = [];
+	if ( o.showParks ) files.push( [ 'parks', buildMapSVG( { ...bare, showParks: true } ) ] );
+	if ( o.showWater ) files.push( [ 'water', buildMapSVG( { ...bare, showWater: true } ) ] );
+	for ( const k of [ ...ROAD_CLASSES ].reverse() ) if ( o.roadOn[ k ] ) files.push( [ k, buildMapSVG( { ...bare, roadOn: { ...off, [ k ]: true } } ) ] );
+	if ( o.footer ) files.push( [ 'footer', buildMapSVG( { ...bare, footer: o.footer } ) ] );
+	files.push( [ 'combined', buildMapSVG( o ) ] );
+	return files;
+
+}
+
+async function exportLayers() {
+
+	if ( ! data ) return status( 'Fetch an area first' );
+	const path = await save( { defaultPath: 'map', filters: [ { name: 'SVG set', extensions: [ 'svg' ] } ] } );
+	if ( ! path ) return;
+	const dir = path.replace( /\.svg$/i, '' ); // dialog name becomes the folder
+	try {
+
+		const files = layerSVGs();
+		for ( const [ name, svg ] of files ) await invoke( 'save_svg', { path: `${ dir }/${ name }.svg`, content: svg } );
+		status( `Saved ${ files.length } SVGs to ${ dir }` );
+
+	} catch ( e ) { status( `Save failed: ${ e }` ); }
+
+}
+
 $( 'mapPanel' ).addEventListener( 'input', render );
 $( 'mapFetch' ).addEventListener( 'click', fetchArea );
-$( 'mapExport' ).addEventListener( 'click', () => data ? exportSVG( buildMapSVG( opts() ), 'map.svg', 'mapStatus' ) : status( 'Fetch an area first' ) );
+$( 'mapExport' ).addEventListener( 'click', exportLayers );

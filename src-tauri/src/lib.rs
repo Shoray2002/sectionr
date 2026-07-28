@@ -7,6 +7,10 @@ struct Sidecar(Mutex<Option<Child>>);
 
 #[tauri::command]
 fn save_svg(path: String, content: String) -> Result<(), String> {
+    // layered map exports write into a directory named by the save dialog
+    if let Some(dir) = std::path::Path::new(&path).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     std::fs::write(&path, content).map_err(|e| e.to_string())
 }
 

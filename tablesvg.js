@@ -14,6 +14,12 @@ const textEl = ( o ) => o.pathify
 	? ( t, x, y ) => `<path d="${ o.pathify( t, x, y ) }"/>`
 	: ( t, x, y ) => `<text x="${ f( x ) }" y="${ f( y ) }">${ esc( t ) }</text>`;
 
+// o.textStroke (pen width, mm) means pathify yields centerlines: stroke them
+// once at pen width instead of filling — plotters can't fill
+const textAttrs = ( o ) => o.textStroke
+	? `fill="none" stroke="${ o.color }" stroke-width="${ o.textStroke }" stroke-linecap="round" stroke-linejoin="round"`
+	: `fill="${ o.color }"`;
+
 // o: { width, rows, cols, rowHeight, fontSize, pad, weights[], cells[][],
 //      horizontal, vertical, border, color, strokeWidth }
 export function buildTableSVG( o ) {
@@ -42,7 +48,7 @@ export function buildTableSVG( o ) {
 
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="${ f( o.width ) }mm" height="${ f( H ) }mm" viewBox="0 0 ${ f( o.width ) } ${ f( H ) }" font-family="${ fontAttr( o ) }" font-size="${ o.fontSize }" xml:space="preserve">
   <g fill="none" stroke="${ o.color }" stroke-width="${ o.strokeWidth }">${ lines }</g>
-  <g fill="${ o.color }">${ texts }</g>
+  <g ${ textAttrs( o ) }>${ texts }</g>
 </svg>`;
 
 }
@@ -57,6 +63,6 @@ export function buildTextSVG( o ) {
 	const H = ( lines.length - 1 ) * lh + fs * 1.05; // 1.05em covers ascent + descent
 	const el = textEl( o );
 	const texts = lines.map( ( l, i ) => l.trim() ? el( l, 0, i * lh + fs * 0.8 ) : '' ).join( '' );
-	return `<svg xmlns="http://www.w3.org/2000/svg" width="${ f( W ) }mm" height="${ f( H ) }mm" viewBox="0 0 ${ f( W ) } ${ f( H ) }" font-family="${ fontAttr( o ) }" font-size="${ fs }" fill="${ o.color }" xml:space="preserve">${ texts }</svg>`;
+	return `<svg xmlns="http://www.w3.org/2000/svg" width="${ f( W ) }mm" height="${ f( H ) }mm" viewBox="0 0 ${ f( W ) } ${ f( H ) }" font-family="${ fontAttr( o ) }" font-size="${ fs }" ${ textAttrs( o ) } xml:space="preserve">${ texts }</svg>`;
 
 }

@@ -36,4 +36,14 @@ const outTbl = buildTableSVG( {
 assert( outTbl.includes( '<path d="M2 6.05h5"' ) );     // x=pad, y=rowMid+0.35em
 assert( ! outTbl.includes( '<text' ) );
 
+// textStroke: centerline text is stroked at pen width, not filled
+const strokedTxt = buildTextSVG( { text: 'ab', fontSize: 10, lineHeight: 1.2, color: '#fff', measure: () => 42, pathify: () => 'M0 0h5', textStroke: 0.35 } );
+assert( strokedTxt.includes( 'fill="none" stroke="#fff" stroke-width="0.35" stroke-linecap="round"' ) );
+const strokedTbl = buildTableSVG( {
+	width: 100, rows: 1, cols: 1, rowHeight: 10, fontSize: 3, pad: 2,
+	weights: [ 1 ], cells: [ [ 'a' ] ], horizontal: false, vertical: false, border: false,
+	color: '#fff', strokeWidth: 0.3, pathify: () => 'M0 0h5', textStroke: 0.3,
+} );
+assert( strokedTbl.includes( '<g fill="none" stroke="#fff" stroke-width="0.3" stroke-linecap="round"' ) );
+
 console.log( 'ok' );

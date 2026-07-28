@@ -64,11 +64,23 @@ const wiggly = { ...base, roads: { ...base.roads, motorway: [ [ [ - 1, 52 ], [ -
 const countL = ( svg ) => ( svg.match( /L/g ) ?? [] ).length;
 assert( countL( buildMapSVG( { ...wiggly, simplify: 1 } ) ) < countL( buildMapSVG( { ...wiggly, simplify: 0 } ) ) );
 
+// footerSpace: a layer file projects identically to the footered combined
+// poster (stacking registration), and differently from a full-height build
+const motorwayD = ( svg ) => svg.match( /<path d="([^"]+)" fill="none" stroke="#fff"/ )?.[ 1 ];
+assert.equal(
+	motorwayD( buildMapSVG( { ...base, footerSpace: true } ) ),
+	motorwayD( buildMapSVG( { ...base, footer: { title: 'X', subtitle: '' } } ) ) );
+assert.notEqual( motorwayD( buildMapSVG( { ...base, footerSpace: true } ) ), motorwayD( buildMapSVG( base ) ) );
+
 // footer: <text> fallback without textPath, outlined paths with it
 const foot = buildMapSVG( { ...base, footer: { title: 'London', subtitle: 'UK' } } );
 assert( foot.includes( 'L O N D O N' ) && foot.includes( 'text-anchor="middle"' ) );
 assert( foot.includes( '51.5000° N / 0.0000° E' ) ); // bbox centre coords
 const outlined = buildMapSVG( { ...base, footer: { title: 'London', subtitle: 'UK' }, textPath: ( t, x, y ) => `M${ x } ${ y }h5`, textWidth: () => 10 } );
 assert( ! outlined.includes( '<text' ) && outlined.includes( 'h5' ) );
+
+// textStroke: footer centerline text stroked at pen width instead of filled
+const strokedFoot = buildMapSVG( { ...base, footer: { title: 'London', subtitle: 'UK' }, textPath: ( t, x, y ) => `M${ x } ${ y }h5`, textWidth: () => 10, textStroke: 0.3 } );
+assert( strokedFoot.includes( 'fill="none" stroke="#fff" stroke-width="0.3" stroke-linecap="round"' ) );
 
 console.log( 'ok' );

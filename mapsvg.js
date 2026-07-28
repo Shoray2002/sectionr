@@ -144,11 +144,14 @@ export function stitchRings( ways ) {
 //      roads:{cls:[[[lon,lat],...],...]}, roadOn:{cls}, roadWidths:{cls},
 //      water:[rings], parks:[rings], showWater, showParks, showBg,
 //      minLen (mm, drop shorter residential/service/path strokes), simplify (mm, point thinning),
-//      footer:{title,subtitle}|null, textPath?(t,x,y,fs), textWidth?(t,fs) }
+//      footer:{title,subtitle}|null, footerSpace (reserve footer band, draw nothing),
+//      textPath?(t,x,y,fs), textWidth?(t,fs) }
 export function buildMapSVG( o ) {
 
 	const W = o.width, H = W * Math.SQRT2, t = o.theme;
-	const mapH = o.footer ? H * 0.85 : H; // clean band below the map for the footer
+	// footerSpace reserves the band without drawing the footer, so per-layer
+	// exports project identically to the combined poster and stack in register
+	const mapH = o.footer || o.footerSpace ? H * 0.85 : H;
 	const proj = projector( o.bbox, W, mapH );
 	const pt = ( p ) => `${ f( p[ 0 ] ) } ${ f( p[ 1 ] ) }`;
 	const ringPath = ( rings ) => rings
@@ -191,8 +194,12 @@ function footerSVG( o, W, H ) {
 	const [ s, w, n, e ] = o.bbox;
 	const lat = ( s + n ) / 2, lon = ( w + e ) / 2;
 	const coords = `${ Math.abs( lat ).toFixed( 4 ) }° ${ lat < 0 ? 'S' : 'N' } / ${ Math.abs( lon ).toFixed( 4 ) }° ${ lon < 0 ? 'W' : 'E' }`;
+	// o.textStroke: textPath yields centerlines — stroke at pen width, no fill
+	const attrs = o.textStroke
+		? `fill="none" stroke="${ t.text }" stroke-width="${ o.textStroke }" stroke-linecap="round" stroke-linejoin="round"`
+		: `fill="${ t.text }"`;
 	const el = ( txt, y, fs ) => ! txt ? '' : o.textPath && o.textWidth
-		? `<path d="${ o.textPath( txt, W / 2 - o.textWidth( txt, fs ) / 2, y, fs ) }" fill="${ t.text }"/>`
+		? `<path d="${ o.textPath( txt, W / 2 - o.textWidth( txt, fs ) / 2, y, fs ) }" ${ attrs }/>`
 		: `<text x="${ f( W / 2 ) }" y="${ f( y ) }" font-size="${ f( fs ) }" text-anchor="middle" fill="${ t.text }" font-family="'Space Mono'" xml:space="preserve">${ esc( txt ) }</text>`;
 
 	return el( ( o.footer.title || '' ).toUpperCase().split( '' ).join( ' ' ), H * 0.90, W / 16 )
