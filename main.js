@@ -51,7 +51,6 @@ const params = {
 	minLineFrac: 0.2,   // drop strokes shorter than this % of the print's longest side
 	simplifyFrac: 0.05, // Douglas–Peucker tolerance as % of longest side
 	smooth: 0,          // Taubin smoothing passes in the sidecar (re-project to apply)
-	removeOverlaps: true, // merge collinear overlapping strokes so the pen draws once
 };
 
 let needsRender = false, previewNeedsRender = false;
@@ -156,7 +155,7 @@ function $( id ) { return document.getElementById( id ); }
 // startup and after loading a config, so the UI always reflects params.
 function syncUI() {
 
-	for ( const id of [ 'displayDrawThroughProjection', 'includeIntersectionEdges', 'smoothSilhouettes', 'visibilityCullMeshes', 'decimate', 'removeOverlaps' ] ) $( id ).checked = params[ id ];
+	for ( const id of [ 'displayDrawThroughProjection', 'includeIntersectionEdges', 'smoothSilhouettes', 'visibilityCullMeshes', 'decimate' ] ) $( id ).checked = params[ id ];
 	$( 'angleThreshold' ).value = params.angleThreshold;
 	$( 'angleVal' ).textContent = params.angleThreshold;
 	$( 'smooth' ).value = params.smooth;
@@ -188,7 +187,6 @@ function bindUI() {
 	bindCheck( 'smoothSilhouettes' );
 	bindCheck( 'visibilityCullMeshes' );
 	bindCheck( 'decimate' );
-	bindCheck( 'removeOverlaps', rebuildLines );
 
 	$( 'angleThreshold' ).addEventListener( 'input', ( e ) => { params.angleThreshold = + e.target.value; $( 'angleVal' ).textContent = e.target.value; } );
 	$( 'smooth' ).addEventListener( 'input', ( e ) => { params.smooth = + e.target.value; $( 'smoothVal' ).textContent = e.target.value; } );
@@ -344,6 +342,7 @@ async function loadModelFromPath( path ) {
 
 		const fullTris = Number( res.headers.get( 'X-Full-Tris' ) ) || 0;
 		setModel( decodeProxy( await res.arrayBuffer() ) );
+		rawVis = rawHid = null;
 		modelPath = path;
 		$( 'downloadSVG' ).disabled = true;
 		outputContainer.innerText = `Loaded ${ fullTris.toLocaleString() } tris — position, then Generate projection`;
@@ -434,9 +433,10 @@ async function generate() {
 
 		if ( ! res.ok ) { outputContainer.innerText = `Projection failed: ${ await res.text() }`; return; }
 
+		const fitPreview = rawVis === null;
 		const { vis, hid } = decodeProject( await res.arrayBuffer() );
 		rawVis = vis; rawHid = hid;
-		rebuildLines(); // dedupe + stitch + speckle-filter, then draw
+		rebuildLines( fitPreview ); // dedupe + stitch + speckle-filter, then draw
 		outputContainer.innerText = `${ visPolys.length } visible + ${ hidPolys.length } hidden strokes`;
 
 	} catch ( e ) {
@@ -576,55 +576,6 @@ function polyLen( p ) {
 
 }
 
-// Collapse overlapping collinear segments so each covered span is drawn once.
-// Groups segments by supporting line (quantized angle + perpendicular offset),
-// then unions their 1D intervals along that line. Distinct parallel lines further
-// apart than `tol` stay separate, so real double-lines survive.
-function mergeOverlaps( arr, tol ) {
-
-	const groups = new Map();
-	const offQ = 1 / tol;
-	const angStep = Math.PI / 90; // 2° buckets
-	for ( let i = 0; i < arr.length; i += 6 ) {
-
-		const ax = arr[ i ], az = arr[ i + 2 ], bx = arr[ i + 3 ], bz = arr[ i + 5 ];
-		let dx = bx - ax, dz = bz - az;
-		const len = Math.hypot( dx, dz );
-		if ( len < 1e-9 ) continue;
-		dx /= len; dz /= len;
-		if ( dx < 0 || ( dx === 0 && dz < 0 ) ) { dx = - dx; dz = - dz; } // canonical direction
-		const nx = - dz, nz = dx;                       // perpendicular unit
-		const off = ax * nx + az * nz;                  // signed distance from origin
-		const key = Math.round( Math.atan2( dz, dx ) / angStep ) + ':' + Math.round( off * offQ );
-		let g = groups.get( key );
-		if ( ! g ) { g = { dx, dz, nx, nz, off, ints: [] }; groups.set( key, g ); }
-		const ta = ax * dx + az * dz, tb = bx * dx + bz * dz;
-		g.ints.push( ta < tb ? [ ta, tb ] : [ tb, ta ] );
-
-	}
-
-	const out = [];
-	for ( const g of groups.values() ) {
-
-		g.ints.sort( ( p, q ) => p[ 0 ] - q[ 0 ] );
-		let cs = g.ints[ 0 ][ 0 ], ce = g.ints[ 0 ][ 1 ];
-		const flush = () => out.push( g.off * g.nx + cs * g.dx, 0, g.off * g.nz + cs * g.dz, g.off * g.nx + ce * g.dx, 0, g.off * g.nz + ce * g.dz );
-		for ( let k = 1; k < g.ints.length; k ++ ) {
-
-			const s = g.ints[ k ][ 0 ], e = g.ints[ k ][ 1 ];
-			if ( s <= ce + tol ) { if ( e > ce ) ce = e; }  // overlapping / touching -> extend
-			else { flush(); cs = s; ce = e; }
-
-		}
-
-		flush();
-
-	}
-
-	return out;
-
-}
-
 // Douglas–Peucker on a flat [x0,z0,x1,z1,...] polyline: drops points within tol of
 // the chord, removing tessellation jitter so curves come out smooth, not faceted.
 function simplifyPoly( p, tol2 ) {
@@ -704,7 +655,7 @@ function updateLineWidth() {
 }
 
 // reprocess the last raw projection with the current cleanup params (no server round-trip)
-function rebuildLines() {
+function rebuildLines( fitPreview = true ) {
 
 	if ( ! rawVis ) return;
 	const b = rawBoundsXZ( rawVis );
@@ -712,16 +663,14 @@ function rebuildLines() {
 	const eps = diag * 1e-4;                      // weld tolerance (0.01% of size)
 	const minLen = diag * params.minLineFrac / 100;
 	const tol2 = ( diag * params.simplifyFrac / 100 ) ** 2;
-	const vsrc = params.removeOverlaps ? mergeOverlaps( rawVis, eps ) : rawVis;
-	const hsrc = params.removeOverlaps ? mergeOverlaps( rawHid, eps ) : rawHid;
-	visPolys = buildPolylines( vsrc, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
-	hidPolys = buildPolylines( hsrc, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
+	visPolys = buildPolylines( rawVis, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
+	hidPolys = buildPolylines( rawHid, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
 	setFatLines( projection, visPolys );
 	setFatLines( drawThrough, hidPolys );
 	printBounds = polyBoundsXZ( visPolys.length ? visPolys : hidPolys );
 	maxDim = printBounds ? Math.max( printBounds.maxX - printBounds.minX, printBounds.maxZ - printBounds.minZ ) || 1 : 1;
 	updateLineWidth();
-	framePreview();
+	if ( fitPreview ) framePreview();
 	$( 'downloadSVG' ).disabled = visPolys.length === 0;
 
 }
