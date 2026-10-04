@@ -40,15 +40,14 @@ fn spawn_sidecar() -> std::io::Result<Child> {
             .spawn()
     } else {
         // release: `deno compile`d sidecar bundled via externalBin, sits next to
-        // the app executable in Contents/MacOS. v8 flags can't be baked into the
-        // compiled binary, so pass them through Deno's env var instead.
+        // the app executable in Contents/MacOS. The heap limit and worker module
+        // are included by the `sidecar` build command in package.json.
         let bin = std::env::current_exe()?
             .parent()
             .unwrap()
             .join("sectionr-sidecar");
 
         std::process::Command::new(bin)
-            .env("DENO_V8_FLAGS", "--max-old-space-size=12000")
             .arg("8787")
             .spawn()
     }

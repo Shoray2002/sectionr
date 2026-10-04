@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "sidecar": "deno compile -A --unstable-webgpu --include node_modules/three/examples/jsm/libs/draco/draco_wasm_wrapper.js --include node_modules/three/examples/jsm/libs/draco/draco_decoder.wasm --output src-tauri/binaries/sectionr-sidecar-aarch64-apple-darwin server/main.js",
+    "sidecar": "deno compile -A --unstable-webgpu --v8-flags=--max-old-space-size=12000 --include server/edges.worker.js --include node_modules/three/examples/jsm/libs/draco/draco_wasm_wrapper.js --include node_modules/three/examples/jsm/libs/draco/draco_decoder.wasm --output src-tauri/binaries/sectionr-sidecar-aarch64-apple-darwin server/main.js",
     "dmg": "tauri build",
     "preview": "vite preview",
     "postinstall": "patch-package",

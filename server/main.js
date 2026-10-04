@@ -25,6 +25,8 @@ import { makeDracoLoader } from "./draco.js";
 import { mergeVertices, mergeGeometries } from "../node_modules/three/examples/jsm/utils/BufferGeometryUtils.js";
 import { MeshoptSimplifier } from "meshoptimizer";
 import { smoothContourEdges } from "./contours.js";
+import { projectionSettings } from "../plotter.js";
+import { ParallelEdges } from "./parallel-edges.js";
 
 // three starts an internal rAF loop on init(); Deno has no rAF / DOM. Stub them.
 // Fire ASAP (not at 16ms): the projection's nextFrame() yields between every compute
@@ -53,6 +55,8 @@ await renderer.init();
 
 let fullRes = null;   // currently loaded full-resolution Object3D (pivot Group)
 let projCache = null; // cached projection input: { budget, smooth, pivot }
+const parallelEdges = new ParallelEdges();
+let modelBusy = false;
 
 function disposeObject(obj) {
   obj?.traverse?.((o) => { if (o.isMesh) o.geometry?.dispose?.(); });
@@ -177,7 +181,7 @@ async function buildProjInput(budget, smooth) {
 
 // --- projection ------------------------------------------------------------
 
-async function project(quat, { angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0, smoothSilhouettes = false } = {}) {
+async function project(quat, { projectionStyle = "detailed", angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0, smoothSilhouettes = false } = {}) {
   if (!fullRes) throw new Error("no model loaded");
 
   // pick projection input. budget=0 & smooth=0 -> project fullRes directly (avoids
@@ -200,8 +204,9 @@ async function project(quat, { angleThreshold = 50, includeIntersectionEdges = f
   target.updateMatrixWorld(true);
 
   const gen = new ProjectionGenerator(renderer);
-  gen.includeIntersectionEdges = includeIntersectionEdges;
-  gen.angleThreshold = angleThreshold;
+  const settings = projectionSettings(projectionStyle, angleThreshold, includeIntersectionEdges);
+  gen.includeIntersectionEdges = settings.includeIntersectionEdges;
+  gen.angleThreshold = settings.angleThreshold;
   gen.batchSize = 1_000_000; // fewer GPU jobs/readbacks than the 100k default
 
   // the visibility epsilon must scale with the model: the library default is
@@ -223,7 +228,10 @@ async function project(quat, { angleThreshold = 50, includeIntersectionEdges = f
     target.traverse((o) => { if (o.isMesh) smoothContourEdges(o, { yOffset: gen.yOffset, creaseAngle: angleThreshold, target: extraEdges }); });
   }
 
-  const result = await gen.generate(input, { onProgress: () => {}, extraEdges });
+  const result = await gen.generate(input, {
+    onProgress: () => {}, extraEdges,
+    getEdges: (scene, generator) => parallelEdges.getEdges(scene, generator),
+  });
   return {
     vis: result.visibleEdges.getLineGeometry().attributes.position.array,
     hid: result.hiddenEdges.getLineGeometry().attributes.position.array,
@@ -260,6 +268,11 @@ const port = Number(Deno.args[0]) || 8787;
 Deno.serve({ port, hostname: "127.0.0.1", onListen: () => log(`sectionr sidecar on http://127.0.0.1:${port}`) }, async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: CORS });
   const { pathname, searchParams } = new URL(req.url);
+  // The loaded model and workers belong to one generation at a time. Keep map,
+  // font and health requests available while the CPU workers are running.
+  const modelRequest = req.method === "POST" && (pathname === "/load" || pathname === "/project");
+  if (modelRequest && modelBusy) return new Response("Model is busy; wait for the current operation.", { status: 409, headers: CORS });
+  if (modelRequest) modelBusy = true;
   try {
     if (pathname === "/health") return new Response("ok", { headers: CORS });
 
@@ -349,6 +362,7 @@ Deno.serve({ port, hostname: "127.0.0.1", onListen: () => log(`sectionr sidecar 
       const pivot = new THREE.Group();
       pivot.add(obj);
       pivot.updateMatrixWorld(true);
+      parallelEdges.dispose();
       disposeObject(fullRes);
       disposeObject(projCache?.pivot);
       projCache = null;
@@ -370,7 +384,10 @@ Deno.serve({ port, hostname: "127.0.0.1", onListen: () => log(`sectionr sidecar 
 
     return new Response("not found", { status: 404, headers: CORS });
   } catch (e) {
+    if (modelRequest) parallelEdges.dispose();
     logErr(e);
     return new Response(String(e?.stack || e), { status: 500, headers: CORS });
+  } finally {
+    if (modelRequest) modelBusy = false;
   }
 });

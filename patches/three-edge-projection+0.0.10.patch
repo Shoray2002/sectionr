@@ -36,18 +36,20 @@ index 60318ac..4daf75b 100644
  
  		}
 diff --git a/node_modules/three-edge-projection/src/utils/generateEdges.js b/node_modules/three-edge-projection/src/utils/generateEdges.js
-index 3c7fc58..b08de15 100644
+index 3c7fc58..fda7410 100644
 --- a/node_modules/three-edge-projection/src/utils/generateEdges.js
 +++ b/node_modules/three-edge-projection/src/utils/generateEdges.js
-@@ -18,6 +18,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -18,6 +18,9 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  		matrix = null,
  		thresholdAngle = 1,
  		iterationTime = 30,
 +		silhouetteEdges = true,
++		vertexIds = null,
++		edgeMasks = null,
  	} = options;
  
  	_localProjection.copy( UP_VECTOR );
-@@ -52,7 +53,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -52,7 +55,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  	const vertKeys = [ 'a', 'b', 'c' ];
  	const hashes = new Array( 3 );
  
@@ -56,9 +58,45 @@ index 3c7fc58..b08de15 100644
  	let time = performance.now();
  	for ( let i = 0; i < indexCount; i += 3 ) {
  
-@@ -123,11 +124,12 @@ export function* generateEdges( geometry, target = [], options = {} ) {
- 			const hash = `${ vecHash0 }_${ vecHash1 }`;
- 			const reverseHash = `${ vecHash1 }_${ vecHash0 }`;
+@@ -83,9 +86,17 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+ 		_triangleLocal.c.fromBufferAttribute( positionAttr, indexArr[ 2 ] );
+ 
+ 		// create hashes for the edge from the vertices
+-		hashes[ 0 ] = `${ Math.round( a.x * precision ) },${ Math.round( a.y * precision ) },${ Math.round( a.z * precision ) }`;
+-		hashes[ 1 ] = `${ Math.round( b.x * precision ) },${ Math.round( b.y * precision ) },${ Math.round( b.z * precision ) }`;
+-		hashes[ 2 ] = `${ Math.round( c.x * precision ) },${ Math.round( c.y * precision ) },${ Math.round( c.z * precision ) }`;
++		if ( vertexIds ) {
++
++			for ( let j = 0; j < 3; j ++ ) hashes[ j ] = vertexIds[ indexArr[ j ] ];
++
++		} else {
++
++			hashes[ 0 ] = `${ Math.round( a.x * precision ) },${ Math.round( a.y * precision ) },${ Math.round( a.z * precision ) }`;
++			hashes[ 1 ] = `${ Math.round( b.x * precision ) },${ Math.round( b.y * precision ) },${ Math.round( b.z * precision ) }`;
++			hashes[ 2 ] = `${ Math.round( c.x * precision ) },${ Math.round( c.y * precision ) },${ Math.round( c.z * precision ) }`;
++
++		}
+ 
+ 		// skip degenerate triangles
+ 		if ( hashes[ 0 ] === hashes[ 1 ] || hashes[ 1 ] === hashes[ 2 ] || hashes[ 2 ] === hashes[ 0 ] ) {
+@@ -113,6 +124,9 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+ 		// iterate over every edge
+ 		for ( let j = 0; j < 3; j ++ ) {
+ 
++			// A shard owns both directions of an edge, including boundary edges.
++			if ( edgeMasks && ! ( edgeMasks[ i / 3 ] & ( 1 << j ) ) ) continue;
++
+ 			// get the first and next vertex making up the edge
+ 			const jNext = ( j + 1 ) % 3;
+ 			const vecHash0 = hashes[ j ];
+@@ -120,14 +134,15 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+ 			const v0 = _triangleLocal[ vertKeys[ j ] ];
+ 			const v1 = _triangleLocal[ vertKeys[ jNext ] ];
+ 
+-			const hash = `${ vecHash0 }_${ vecHash1 }`;
+-			const reverseHash = `${ vecHash1 }_${ vecHash0 }`;
++			const hash = vertexIds ? vecHash0 * vertexIds.length + vecHash1 : `${ vecHash0 }_${ vecHash1 }`;
++			const reverseHash = vertexIds ? vecHash1 * vertexIds.length + vecHash0 : `${ vecHash1 }_${ vecHash0 }`;
  
 -			if ( reverseHash in edgeData && edgeData[ reverseHash ] ) {
 +			const reverseEntry = edgeData.get( reverseHash );
@@ -71,7 +109,7 @@ index 3c7fc58..b08de15 100644
  				const meetsThreshold = _normal.dot( otherNormal ) <= thresholdDot;
  
  				// get the dot product relative to the projection angle and
-@@ -141,7 +143,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -141,7 +156,7 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  
  				const projectionThreshold = Math.sign( normDot ) !== Math.sign( otherDot );
  
@@ -80,7 +118,7 @@ index 3c7fc58..b08de15 100644
  
  					const line = new ProjectionEdge();
  					line.start.copy( v0 );
-@@ -150,18 +152,18 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -150,18 +165,18 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  
  				}
  
@@ -103,7 +141,7 @@ index 3c7fc58..b08de15 100644
  
  			}
  
-@@ -170,11 +172,11 @@ export function* generateEdges( geometry, target = [], options = {} ) {
+@@ -170,11 +185,11 @@ export function* generateEdges( geometry, target = [], options = {} ) {
  	}
  
  	// iterate over all remaining, unmatched edges and add them to the vertex array
@@ -119,7 +157,7 @@ index 3c7fc58..b08de15 100644
  			_v1.fromBufferAttribute( positionAttr, index1 );
  
 diff --git a/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js b/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js
-index 922a63d..3dad869 100644
+index 922a63d..fcef32c 100644
 --- a/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js
 +++ b/node_modules/three-edge-projection/src/webgpu/ProjectionGenerator.js
 @@ -73,6 +73,24 @@ export class ProjectionGenerator {
@@ -154,7 +192,7 @@ index 922a63d..3dad869 100644
 -		const { renderer, angleThreshold, includeIntersectionEdges, batchSize, iterationTime, parallelJobs } = this;
 -		const { onProgress = null, signal = null } = options;
 +		const { renderer, angleThreshold, includeIntersectionEdges, batchSize, iterationTime, parallelJobs, silhouetteEdges, yOffset } = this;
-+		const { onProgress = null, signal = null, extraEdges = null } = options;
++		const { onProgress = null, signal = null, extraEdges = null, getEdges = null } = options;
  
  		// collect meshes
  		const meshes = getAllMeshes( scene );
@@ -172,7 +210,24 @@ index 922a63d..3dad869 100644
  
  		if ( onProgress ) {
  
-@@ -124,6 +141,18 @@ export class ProjectionGenerator {
+@@ -108,7 +125,15 @@ export class ProjectionGenerator {
+ 		}
+ 
+ 		let edges = [];
+-		await edgeGenerator.getEdgesAsync( scene, edges );
++		if ( getEdges ) {
++
++			edges = await getEdges( scene, edgeGenerator );
++
++		} else {
++
++			await edgeGenerator.getEdgesAsync( scene, edges );
++
++		}
+ 		signal?.throwIfAborted();
+ 
+ 		if ( includeIntersectionEdges ) {
+@@ -124,6 +149,18 @@ export class ProjectionGenerator {
  
  		}
  

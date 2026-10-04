@@ -27,6 +27,7 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { filterPlotterPolylines, sortPlotterPolylines } from './plotter.js';
 
 const API = 'http://127.0.0.1:8787';
 
@@ -40,6 +41,7 @@ const params = {
 	displayDrawThroughProjection: false,
 	includeIntersectionEdges: false,
 	smoothSilhouettes: false, // interpolated contours instead of jagged mesh-edge silhouettes (curved models)
+	projectionStyle: 'plotter',
 	angleThreshold: 50,
 	visibilityCullMeshes: false,
 	decimate: false,
@@ -158,6 +160,9 @@ function syncUI() {
 	for ( const id of [ 'displayDrawThroughProjection', 'includeIntersectionEdges', 'smoothSilhouettes', 'visibilityCullMeshes', 'decimate' ] ) $( id ).checked = params[ id ];
 	$( 'angleThreshold' ).value = params.angleThreshold;
 	$( 'angleVal' ).textContent = params.angleThreshold;
+	$( 'projectionStyle' ).value = params.projectionStyle;
+	$( 'angleThreshold' ).disabled = params.projectionStyle !== 'detailed';
+	$( 'includeIntersectionEdges' ).disabled = params.projectionStyle !== 'detailed';
 	$( 'smooth' ).value = params.smooth;
 	$( 'smoothVal' ).textContent = params.smooth;
 	$( 'simplifyBudget' ).value = params.simplifyBudget;
@@ -188,6 +193,13 @@ function bindUI() {
 	bindCheck( 'visibilityCullMeshes' );
 	bindCheck( 'decimate' );
 
+	$( 'projectionStyle' ).addEventListener( 'change', ( e ) => {
+
+		params.projectionStyle = e.target.value;
+		$( 'angleThreshold' ).disabled = params.projectionStyle !== 'detailed';
+		$( 'includeIntersectionEdges' ).disabled = params.projectionStyle !== 'detailed';
+
+	} );
 	$( 'angleThreshold' ).addEventListener( 'input', ( e ) => { params.angleThreshold = + e.target.value; $( 'angleVal' ).textContent = e.target.value; } );
 	$( 'smooth' ).addEventListener( 'input', ( e ) => { params.smooth = + e.target.value; $( 'smoothVal' ).textContent = e.target.value; } );
 	$( 'simplifyBudget' ).addEventListener( 'input', ( e ) => { params.simplifyBudget = + e.target.value; $( 'budgetVal' ).textContent = fmtBudget( params.simplifyBudget ); } );
@@ -422,6 +434,7 @@ async function generate() {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify( {
 				quaternion: [ q.x, q.y, q.z, q.w ],
+				projectionStyle: params.projectionStyle,
 				angleThreshold: params.angleThreshold,
 				includeIntersectionEdges: params.includeIntersectionEdges,
 				smoothSilhouettes: params.smoothSilhouettes,
@@ -665,6 +678,13 @@ function rebuildLines( fitPreview = true ) {
 	const tol2 = ( diag * params.simplifyFrac / 100 ) ** 2;
 	visPolys = buildPolylines( rawVis, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
 	hidPolys = buildPolylines( rawHid, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
+	if ( params.projectionStyle === 'plotter' ) {
+
+		const rawMaxDim = Math.max( b.maxX - b.minX, b.maxZ - b.minZ ) || 1;
+		visPolys = filterPlotterPolylines( visPolys, rawMaxDim, { minLengthMm: Math.max( 1, params.strokeWidth * 3 ) } );
+		hidPolys = filterPlotterPolylines( hidPolys, rawMaxDim, { minLengthMm: 2, maxLinesPerCell: 3 } );
+
+	}
 	setFatLines( projection, visPolys );
 	setFatLines( drawThrough, hidPolys );
 	printBounds = polyBoundsXZ( visPolys.length ? visPolys : hidPolys );
@@ -778,8 +798,10 @@ async function downloadSVG() {
 	const stroke = params.strokeWidth / mm;    // pen width (mm) -> viewBox units
 	const cap = ' stroke-linecap="round" stroke-linejoin="round"';
 
-	const visPath = `<path d="${ polysPath( visPolys, minSx, minSy ) }" fill="none" stroke="${ params.visibleColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>`;
-	const hidPath = exportHidden ? `\n  <path d="${ polysPath( hidPolys, minSx, minSy ) }" fill="none" stroke="${ params.hiddenColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>` : '';
+	const orderedVis = sortPlotterPolylines( visPolys );
+	const orderedHid = exportHidden ? sortPlotterPolylines( hidPolys ) : [];
+	const visPath = `<path d="${ polysPath( orderedVis, minSx, minSy ) }" fill="none" stroke="${ params.visibleColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>`;
+	const hidPath = exportHidden ? `\n  <path d="${ polysPath( orderedHid, minSx, minSy ) }" fill="none" stroke="${ params.hiddenColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>` : '';
 
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${ ( w * mm ).toFixed( 2 ) }mm" height="${ ( h * mm ).toFixed( 2 ) }mm" viewBox="0 0 ${ w.toFixed( 4 ) } ${ h.toFixed( 4 ) }">
   ${ visPath }${ hidPath }
