@@ -27,20 +27,21 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
-import { filterPlotterPolylines, sortPlotterPolylines } from './plotter.js';
+import { sortPlotterPolylines } from './plotter.js';
+import { buildPolylines, simplifyPoly, fitPolyline, flattenCurves, curvesPath } from './linework.js';
 
 const API = 'http://127.0.0.1:8787';
 
 // Maps the camera's view frame into the sidecar's "project down world +Y onto
 // XZ" frame: view depth (Z) -> world Y (projection axis), view up (Y) -> world
-// -Z. With the SVG export / preview flipping Z back, the print matches the view.
+// -Z. SVG uses +Z downward; the preview camera looks down +Y with -Z up.
 // ponytail: if visible & hidden edges come out swapped, negate this angle.
 const PROJ_SWAP = new Quaternion().setFromAxisAngle( new Vector3( 1, 0, 0 ), - Math.PI / 2 );
 
 const params = {
 	displayDrawThroughProjection: false,
 	includeIntersectionEdges: false,
-	smoothSilhouettes: false, // interpolated contours instead of jagged mesh-edge silhouettes (curved models)
+	smoothCurves: true, // fit visible strokes without changing surface visibility
 	projectionStyle: 'plotter',
 	angleThreshold: 50,
 	visibilityCullMeshes: false,
@@ -50,14 +51,15 @@ const params = {
 	hiddenColor: '#999999',
 	strokeWidth: 0.3, // pen width in mm
 	previewBg: '#f5f5f5',
-	minLineFrac: 0.2,   // drop strokes shorter than this % of the print's longest side
-	simplifyFrac: 0.05, // Douglas–Peucker tolerance as % of longest side
+	minLineFrac: 0.1,   // drop strokes shorter than this % of the print's longest side
+	simplifyFrac: 0.06, // curve tolerance as % of longest side (0.18mm at 300mm)
 	smooth: 0,          // Taubin smoothing passes in the sidecar (re-project to apply)
 };
 
 let needsRender = false, previewNeedsRender = false;
 let renderer, camera, scene, group, model, gizmo, viewSize = 1, modelPath = null;
 let rawVis = null, rawHid = null;          // last raw projected segments from the sidecar
+let visCurves = [], hidCurves = [];
 let visPolys = [], hidPolys = [], printBounds = null, maxDim = 1; // cleaned strokes (XZ)
 let previewRenderer, previewCamera, previewScene, projection, drawThrough;
 let view, preview, outputContainer;
@@ -111,7 +113,7 @@ function init() {
 	previewScene.add( projection, drawThrough );
 
 	previewCamera = new OrthographicCamera( - 1, 1, 1, - 1, 0.01, 1e7 );
-	previewCamera.up.set( 0, 0, - 1 ); // world -Z is "up" in the print, matching the SVG y = -z
+	previewCamera.up.set( 0, 0, - 1 ); // world -Z is up; SVG +Z points down
 
 	// zoom the projection preview with the wheel
 	const pv = previewRenderer.domElement;
@@ -120,7 +122,7 @@ function init() {
 		e.preventDefault();
 		previewCamera.zoom = Math.max( 0.2, previewCamera.zoom * ( 1 - e.deltaY * 0.001 ) );
 		previewCamera.updateProjectionMatrix();
-		previewNeedsRender = true;
+		updateLineWidth();
 
 	}, { passive: false } );
 
@@ -157,7 +159,7 @@ function $( id ) { return document.getElementById( id ); }
 // startup and after loading a config, so the UI always reflects params.
 function syncUI() {
 
-	for ( const id of [ 'displayDrawThroughProjection', 'includeIntersectionEdges', 'smoothSilhouettes', 'visibilityCullMeshes', 'decimate' ] ) $( id ).checked = params[ id ];
+	for ( const id of [ 'displayDrawThroughProjection', 'includeIntersectionEdges', 'smoothCurves', 'visibilityCullMeshes', 'decimate' ] ) $( id ).checked = params[ id ];
 	$( 'angleThreshold' ).value = params.angleThreshold;
 	$( 'angleVal' ).textContent = params.angleThreshold;
 	$( 'projectionStyle' ).value = params.projectionStyle;
@@ -189,7 +191,7 @@ function bindUI() {
 
 	bindCheck( 'displayDrawThroughProjection', () => previewNeedsRender = true );
 	bindCheck( 'includeIntersectionEdges' );
-	bindCheck( 'smoothSilhouettes' );
+	bindCheck( 'smoothCurves', () => rebuildLines() );
 	bindCheck( 'visibilityCullMeshes' );
 	bindCheck( 'decimate' );
 
@@ -437,7 +439,6 @@ async function generate() {
 				projectionStyle: params.projectionStyle,
 				angleThreshold: params.angleThreshold,
 				includeIntersectionEdges: params.includeIntersectionEdges,
-				smoothSilhouettes: params.smoothSilhouettes,
 				visibilityCull: params.visibilityCullMeshes,
 				simplifyBudget: params.decimate ? params.simplifyBudget : 0,
 				smooth: params.smooth,
@@ -498,7 +499,7 @@ function decodeProject( buf ) {
 
 function makeFatLine( color ) {
 
-	const mat = new LineMaterial( { worldUnits: true, linewidth: 0.01 } );
+	const mat = new LineMaterial( { linewidth: 1, alphaToCoverage: true } );
 	mat.color.set( color );
 	mat.resolution.set( preview.clientWidth, preview.clientHeight );
 	return new LineSegments2( new LineSegmentsGeometry(), mat );
@@ -518,109 +519,6 @@ function rawBoundsXZ( arr ) {
 	}
 
 	return { minX, minZ, maxX, maxZ };
-
-}
-
-// stitch a flat segment array into deduped polylines, dropping ones shorter than minLen.
-// Each polyline is a flat [x0,z0,x1,z1,...] in the XZ print plane.
-function buildPolylines( arr, eps, minLen ) {
-
-	const q = 1 / eps;
-	const vid = new Map(), vx = [], vz = [];
-	const id = ( x, z ) => {
-
-		const k = Math.round( x * q ) + ',' + Math.round( z * q );
-		let i = vid.get( k );
-		if ( i === undefined ) { i = vx.length; vid.set( k, i ); vx.push( x ); vz.push( z ); }
-		return i;
-
-	};
-
-	const adj = [];
-	const seen = new Set();
-	const ek = ( a, b ) => a < b ? a + '_' + b : b + '_' + a;
-	for ( let i = 0; i < arr.length; i += 6 ) {
-
-		const a = id( arr[ i ], arr[ i + 2 ] ), b = id( arr[ i + 3 ], arr[ i + 5 ] );
-		if ( a === b ) continue;          // degenerate after welding
-		const k = ek( a, b );
-		if ( seen.has( k ) ) continue;    // duplicate edge — the doubling fix
-		seen.add( k );
-		( adj[ a ] || ( adj[ a ] = [] ) ).push( b );
-		( adj[ b ] || ( adj[ b ] = [] ) ).push( a );
-
-	}
-
-	const used = new Set();
-	const walk = ( start ) => {
-
-		const line = [ vx[ start ], vz[ start ] ];
-		let cur = start;
-		for ( ;; ) {
-
-			let next = - 1;
-			for ( const n of adj[ cur ] || [] ) if ( ! used.has( ek( cur, n ) ) ) { next = n; break; }
-			if ( next === - 1 ) break;
-			used.add( ek( cur, next ) );
-			line.push( vx[ next ], vz[ next ] );
-			cur = next;
-
-		}
-
-		return line;
-
-	};
-
-	const hasUnused = ( i ) => ( adj[ i ] || [] ).some( n => ! used.has( ek( i, n ) ) );
-	const polys = [];
-	// open chains / junctions first (degree != 2), then leftover closed loops
-	for ( let i = 0; i < vx.length; i ++ ) if ( ( adj[ i ] || [] ).length !== 2 ) while ( hasUnused( i ) ) polys.push( walk( i ) );
-	for ( let i = 0; i < vx.length; i ++ ) while ( hasUnused( i ) ) polys.push( walk( i ) );
-
-	return minLen > 0 ? polys.filter( p => polyLen( p ) >= minLen ) : polys;
-
-}
-
-function polyLen( p ) {
-
-	let L = 0;
-	for ( let i = 0; i < p.length - 2; i += 2 ) L += Math.hypot( p[ i + 2 ] - p[ i ], p[ i + 3 ] - p[ i + 1 ] );
-	return L;
-
-}
-
-// Douglas–Peucker on a flat [x0,z0,x1,z1,...] polyline: drops points within tol of
-// the chord, removing tessellation jitter so curves come out smooth, not faceted.
-function simplifyPoly( p, tol2 ) {
-
-	const n = p.length / 2;
-	if ( n < 3 ) return p;
-	const keep = new Uint8Array( n );
-	keep[ 0 ] = keep[ n - 1 ] = 1;
-	const stack = [ [ 0, n - 1 ] ];
-	while ( stack.length ) {
-
-		const [ s, e ] = stack.pop();
-		const ax = p[ s * 2 ], az = p[ s * 2 + 1 ], dx = p[ e * 2 ] - ax, dz = p[ e * 2 + 1 ] - az;
-		const len2 = dx * dx + dz * dz || 1e-12;
-		let maxD = - 1, idx = - 1;
-		for ( let i = s + 1; i < e; i ++ ) {
-
-			const px = p[ i * 2 ], pz = p[ i * 2 + 1 ];
-			const t = ( ( px - ax ) * dx + ( pz - az ) * dz ) / len2;
-			const cx = ax + t * dx, cz = az + t * dz;
-			const d = ( px - cx ) ** 2 + ( pz - cz ) ** 2;
-			if ( d > maxD ) { maxD = d; idx = i; }
-
-		}
-
-		if ( maxD > tol2 ) { keep[ idx ] = 1; stack.push( [ s, idx ], [ idx, e ] ); }
-
-	}
-
-	const out = [];
-	for ( let i = 0; i < n; i ++ ) if ( keep[ i ] ) out.push( p[ i * 2 ], p[ i * 2 + 1 ] );
-	return out;
 
 }
 
@@ -657,10 +555,12 @@ function setFatLines( obj, polys ) {
 
 }
 
-// worldUnits line width = pen width (mm) expressed in model units (longest side = 300mm)
+// Screen-space strokes avoid world-unit shader precision artifacts on thin lines.
+// Convert the physical pen width through the orthographic camera, including zoom.
 function updateLineWidth() {
 
-	const lw = params.strokeWidth * maxDim / 300 || 0.001;
+	const pixelsPerUnit = preview.clientHeight * previewCamera.zoom / ( previewCamera.top - previewCamera.bottom );
+	const lw = params.strokeWidth * maxDim / 300 * pixelsPerUnit;
 	projection.material.linewidth = lw;
 	drawThrough.material.linewidth = lw;
 	previewNeedsRender = true;
@@ -672,19 +572,17 @@ function rebuildLines( fitPreview = true ) {
 
 	if ( ! rawVis ) return;
 	const b = rawBoundsXZ( rawVis );
-	const diag = Math.hypot( b.maxX - b.minX, b.maxZ - b.minZ ) || 1;
-	const eps = diag * 1e-4;                      // weld tolerance (0.01% of size)
-	const minLen = diag * params.minLineFrac / 100;
-	const tol2 = ( diag * params.simplifyFrac / 100 ) ** 2;
-	visPolys = buildPolylines( rawVis, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
-	hidPolys = buildPolylines( rawHid, eps, minLen ).map( p => simplifyPoly( p, tol2 ) );
-	if ( params.projectionStyle === 'plotter' ) {
-
-		const rawMaxDim = Math.max( b.maxX - b.minX, b.maxZ - b.minZ ) || 1;
-		visPolys = filterPlotterPolylines( visPolys, rawMaxDim, { minLengthMm: Math.max( 1, params.strokeWidth * 3 ) } );
-		hidPolys = filterPlotterPolylines( hidPolys, rawMaxDim, { minLengthMm: 2, maxLinesPerCell: 3 } );
-
-	}
+	const rawMaxDim = Math.max( b.maxX - b.minX, b.maxZ - b.minZ ) || 1;
+	const eps = rawMaxDim * 1e-4; // 0.03mm at the standard 300mm print size
+	const minLen = rawMaxDim * params.minLineFrac / 100;
+	const tolerance = rawMaxDim * params.simplifyFrac / 100;
+	const prepare = raw => sortPlotterPolylines( buildPolylines( raw, eps, minLen ).map( p =>
+		simplifyPoly( p, ( tolerance * ( params.smoothCurves ? 0.25 : 1 ) ) ** 2 )
+	) ).map( p => fitPolyline( p, params.smoothCurves ? tolerance * 0.75 : 0 ) );
+	visCurves = prepare( rawVis );
+	hidCurves = prepare( rawHid );
+	visPolys = visCurves.map( c => flattenCurves( c, rawMaxDim / 300 * 0.01 ) );
+	hidPolys = hidCurves.map( c => flattenCurves( c, rawMaxDim / 300 * 0.01 ) );
 	setFatLines( projection, visPolys );
 	setFatLines( drawThrough, hidPolys );
 	printBounds = polyBoundsXZ( visPolys.length ? visPolys : hidPolys );
@@ -734,6 +632,7 @@ function framePreview() {
 	previewCamera.position.set( cx, Math.max( w, h ) * 2 + 10, cz );
 	previewCamera.lookAt( cx, 0, cz );
 	previewCamera.updateProjectionMatrix();
+	updateLineWidth();
 
 }
 
@@ -759,33 +658,18 @@ function resize() {
 
 }
 
-// SVG path 'd' for polylines, in paper space (x, y=-z), offset to the print origin
-function polysPath( polys, minSx, minSy ) {
-
-	let d = '';
-	for ( const p of polys ) {
-
-		d += `M${ ( p[ 0 ] - minSx ).toFixed( 4 ) } ${ ( - p[ 1 ] - minSy ).toFixed( 4 ) }`;
-		for ( let i = 2; i < p.length; i += 2 ) d += `L${ ( p[ i ] - minSx ).toFixed( 4 ) } ${ ( - p[ i + 1 ] - minSy ).toFixed( 4 ) }`;
-
-	}
-
-	return d;
-
-}
-
-// --- SVG export (strokes lie on XZ plane; flip z so the top-down print isn't mirrored) ---
+// --- SVG export (the same fitted curves shown in the preview) ---
 async function downloadSVG() {
 
 	if ( ! visPolys.length ) return;
 	const exportHidden = params.displayDrawThroughProjection && hidPolys.length > 0;
 
-	// paper-space bounds: sx = x, sy = -z
+	// paper-space bounds: sx = x, sy = z (matches the preview)
 	const all = exportHidden ? visPolys.concat( hidPolys ) : visPolys;
 	let minSx = Infinity, minSy = Infinity, maxSx = - Infinity, maxSy = - Infinity;
 	for ( const p of all ) for ( let i = 0; i < p.length; i += 2 ) {
 
-		const sx = p[ i ], sy = - p[ i + 1 ];
+		const sx = p[ i ], sy = p[ i + 1 ];
 		if ( sx < minSx ) minSx = sx; if ( sx > maxSx ) maxSx = sx;
 		if ( sy < minSy ) minSy = sy; if ( sy > maxSy ) maxSy = sy;
 
@@ -798,10 +682,8 @@ async function downloadSVG() {
 	const stroke = params.strokeWidth / mm;    // pen width (mm) -> viewBox units
 	const cap = ' stroke-linecap="round" stroke-linejoin="round"';
 
-	const orderedVis = sortPlotterPolylines( visPolys );
-	const orderedHid = exportHidden ? sortPlotterPolylines( hidPolys ) : [];
-	const visPath = `<path d="${ polysPath( orderedVis, minSx, minSy ) }" fill="none" stroke="${ params.visibleColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>`;
-	const hidPath = exportHidden ? `\n  <path d="${ polysPath( orderedHid, minSx, minSy ) }" fill="none" stroke="${ params.hiddenColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>` : '';
+	const visPath = `<path d="${ curvesPath( visCurves, minSx, minSy ) }" fill="none" stroke="${ params.visibleColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>`;
+	const hidPath = exportHidden ? `\n  <path d="${ curvesPath( hidCurves, minSx, minSy ) }" fill="none" stroke="${ params.hiddenColor }" stroke-width="${ stroke.toFixed( 5 ) }"${ cap }/>` : '';
 
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${ ( w * mm ).toFixed( 2 ) }mm" height="${ ( h * mm ).toFixed( 2 ) }mm" viewBox="0 0 ${ w.toFixed( 4 ) } ${ h.toFixed( 4 ) }">
   ${ visPath }${ hidPath }

@@ -24,7 +24,6 @@ import { MeshoptDecoder } from "../node_modules/three/examples/jsm/libs/meshopt_
 import { makeDracoLoader } from "./draco.js";
 import { mergeVertices, mergeGeometries } from "../node_modules/three/examples/jsm/utils/BufferGeometryUtils.js";
 import { MeshoptSimplifier } from "meshoptimizer";
-import { smoothContourEdges } from "./contours.js";
 import { projectionSettings } from "../plotter.js";
 import { ParallelEdges } from "./parallel-edges.js";
 
@@ -181,17 +180,15 @@ async function buildProjInput(budget, smooth) {
 
 // --- projection ------------------------------------------------------------
 
-async function project(quat, { projectionStyle = "detailed", angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0, smoothSilhouettes = false } = {}) {
+async function project(quat, { projectionStyle = "detailed", angleThreshold = 50, includeIntersectionEdges = false, visibilityCull = false, simplifyBudget = 0, smooth = 0 } = {}) {
   if (!fullRes) throw new Error("no model loaded");
 
   // pick projection input. budget=0 & smooth=0 -> project fullRes directly (avoids
   // an expensive weld of the full mesh). Otherwise build & cache a processed copy.
-  // smoothSilhouettes also needs the welded copy: interpolated contours require
-  // smooth vertex normals, which only exist on welded geometry.
   const budget = simplifyBudget > 0 ? simplifyBudget : 0;
   smooth = smooth | 0;
   let target = fullRes;
-  if (budget > 0 || smooth > 0 || smoothSilhouettes) {
+  if (budget > 0 || smooth > 0) {
     if (!projCache || projCache.budget !== budget || projCache.smooth !== smooth) {
       disposeObject(projCache?.pivot);
       projCache = { budget, smooth, pivot: await buildProjInput(budget, smooth) };
@@ -218,18 +215,8 @@ async function project(quat, { projectionStyle = "detailed", angleThreshold = 50
   // optionally drop meshes/faces not visible from the projection direction
   const input = visibilityCull ? await new MeshVisibilityCuller(renderer, { pixelsPerMeter: 0.1 }).cull(target) : target;
 
-  // swap jagged mesh-edge silhouettes for interpolated smooth contours (crease
-  // and boundary edges are unaffected). Extracted from the pre-cull target: culled
-  // geometry is invisible from the projection direction, so it can't occlude.
-  let extraEdges = null;
-  if (smoothSilhouettes) {
-    gen.silhouetteEdges = false;
-    extraEdges = [];
-    target.traverse((o) => { if (o.isMesh) smoothContourEdges(o, { yOffset: gen.yOffset, creaseAngle: angleThreshold, target: extraEdges }); });
-  }
-
   const result = await gen.generate(input, {
-    onProgress: () => {}, extraEdges,
+    onProgress: () => {},
     getEdges: (scene, generator) => parallelEdges.getEdges(scene, generator),
   });
   return {

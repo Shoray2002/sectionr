@@ -105,9 +105,9 @@
         <option value="plotter" selected>Plotter</option>
         <option value="detailed">Detailed</option>
       </select></div>
-      <p class="hint">Plotter keeps major creases and limits detail in crowded areas.</p>
+      <p class="hint">Plotter keeps major creases and complete visible outlines.</p>
       <div class="check"><input id="includeIntersectionEdges" type="checkbox"><label for="includeIntersectionEdges">Include intersection edges</label></div>
-      <div class="check"><input id="smoothSilhouettes" type="checkbox"><label for="smoothSilhouettes">Smooth silhouettes (curved models)</label></div>
+      <div class="check"><input id="smoothCurves" type="checkbox" checked><label for="smoothCurves">Smooth curves</label></div>
       <div style="margin:10px 0 0">
         <label for="angleThreshold">Edge angle: <span id="angleVal">50</span>°</label>
         <input id="angleThreshold" type="range" min="1" max="90" value="50" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
@@ -138,14 +138,14 @@
         <input id="strokeWidth" type="range" min="0.05" max="2" step="0.05" value="0.3" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
       </div>
       <div style="margin:10px 0 0">
-        <label for="minLineFrac">Min line length: <span id="minLineVal">0.2</span>%</label>
-        <input id="minLineFrac" type="range" min="0" max="2" step="0.1" value="0.2" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
+        <label for="minLineFrac">Min line length: <span id="minLineVal">0.1</span>%</label>
+        <input id="minLineFrac" type="range" min="0" max="2" step="0.1" value="0.1" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
       </div>
       <div style="margin:10px 0 0">
-        <label for="simplifyFrac">Simplify: <span id="simplifyVal">0.05</span>%</label>
-        <input id="simplifyFrac" type="range" min="0" max="0.5" step="0.01" value="0.05" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
+        <label for="simplifyFrac">Curve tolerance: <span id="simplifyVal">0.06</span>%</label>
+        <input id="simplifyFrac" type="range" min="0" max="0.5" step="0.01" value="0.06" style="width:100%;margin-top:6px;accent-color:#e5e7eb">
       </div>
-      <p class="hint">Drops specks &amp; smooths jitter into clean strokes.</p>
+      <p class="hint">Fits smooth curves while preserving sharp corners. Default tolerance: 0.18 mm at 300 mm. Changes update the preview immediately.</p>
       <div class="row" style="margin-top:12px"><label for="previewBg">Preview background</label>
         <select id="previewBg">
           <option value="#f5f5f5">Paper white</option>

@@ -1,84 +1,8 @@
-function length( p ) {
-
-	let total = 0;
-	for ( let i = 0; i < p.length - 2; i += 2 ) total += Math.hypot( p[ i + 2 ] - p[ i ], p[ i + 3 ] - p[ i + 1 ] );
-	return total;
-
-}
-
 export function projectionSettings( style, angleThreshold, includeIntersectionEdges ) {
 
 	if ( style === 'outline' ) return { angleThreshold: 180, includeIntersectionEdges: false };
 	if ( style === 'plotter' ) return { angleThreshold: 70, includeIntersectionEdges: false };
 	return { angleThreshold, includeIntersectionEdges };
-
-}
-
-function occupiedCells( p, minX, minY, cellSize ) {
-
-	const cells = new Set();
-	for ( let i = 0; i < p.length - 2; i += 2 ) {
-
-		const ax = p[ i ], ay = p[ i + 1 ], bx = p[ i + 2 ], by = p[ i + 3 ];
-		const steps = Math.max( 1, Math.ceil( Math.hypot( bx - ax, by - ay ) / ( cellSize * 0.5 ) ) );
-		for ( let j = 0; j <= steps; j ++ ) {
-
-			const t = j / steps;
-			const x = Math.floor( ( ax + ( bx - ax ) * t - minX ) / cellSize );
-			const y = Math.floor( ( ay + ( by - ay ) * t - minY ) / cellSize );
-			cells.add( `${ x },${ y }` );
-
-		}
-
-	}
-	return cells;
-
-}
-
-// Keep long, closed structural strokes first, then admit detail while each
-// physical patch of the drawing remains below a local line budget.
-export function filterPlotterPolylines( polys, maxDim, {
-	minLengthMm = 1,
-	cellSizeMm = 8,
-	maxLinesPerCell = 5,
-	minOpenCellFraction = 0.6,
-} = {} ) {
-
-	if ( ! polys.length || ! isFinite( maxDim ) || maxDim <= 0 ) return polys;
-	const unitsPerMm = maxDim / 300;
-	const minLength = minLengthMm * unitsPerMm;
-	const cellSize = cellSizeMm * unitsPerMm;
-	let minX = Infinity, minY = Infinity;
-	for ( const p of polys ) for ( let i = 0; i < p.length; i += 2 ) {
-
-		if ( p[ i ] < minX ) minX = p[ i ];
-		if ( p[ i + 1 ] < minY ) minY = p[ i + 1 ];
-
-	}
-
-	const candidates = [];
-	for ( const p of polys ) {
-
-		const lineLength = length( p );
-		if ( lineLength < minLength ) continue;
-		const closed = Math.hypot( p[ 0 ] - p[ p.length - 2 ], p[ 1 ] - p[ p.length - 1 ] ) <= unitsPerMm * 0.1;
-		candidates.push( { p, lineLength, score: lineLength * ( closed ? 1.5 : 1 ), cells: occupiedCells( p, minX, minY, cellSize ) } );
-
-	}
-	candidates.sort( ( a, b ) => b.score - a.score );
-
-	const density = new Map();
-	const kept = [];
-	for ( const candidate of candidates ) {
-
-		let open = 0;
-		for ( const cell of candidate.cells ) if ( ( density.get( cell ) || 0 ) < maxLinesPerCell ) open ++;
-		if ( kept.length && candidate.cells.size && open / candidate.cells.size < minOpenCellFraction ) continue;
-		kept.push( candidate.p );
-		for ( const cell of candidate.cells ) density.set( cell, ( density.get( cell ) || 0 ) + 1 );
-
-	}
-	return kept;
 
 }
 
