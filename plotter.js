@@ -6,49 +6,83 @@ export function projectionSettings( style, angleThreshold, includeIntersectionEd
 
 }
 
-// Greedy nearest-neighbour ordering with path reversal. This changes only pen-up
-// travel; path geometry and the rendered image remain identical.
-export function sortPlotterPolylines( polys ) {
+// Index both ends so detailed drawings also get nearest-neighbour ordering.
+// Reversing a path changes pen-up travel only, never the geometry.
+function sortPaths( paths, endpoints, reverse ) {
 
-	if ( polys.length < 2 ) return polys.slice();
-	if ( polys.length > 3000 ) {
+	if ( paths.length < 2 ) return paths.slice();
+	const ends = paths.map( endpoints );
+	let minX = Infinity, minY = Infinity, maxX = - Infinity, maxY = - Infinity;
+	for ( const p of ends ) {
 
-		// Avoid quadratic export time for unfiltered detailed drawings.
-		return polys.slice().sort( ( a, b ) => a[ 1 ] - b[ 1 ] || a[ 0 ] - b[ 0 ] );
-
-	}
-	const remaining = polys.slice();
-	let first = 0;
-	for ( let i = 1; i < remaining.length; i ++ ) {
-
-		if ( remaining[ i ][ 0 ] < remaining[ first ][ 0 ] ) first = i;
+		minX = Math.min( minX, p[ 0 ], p[ 2 ] ); minY = Math.min( minY, p[ 1 ], p[ 3 ] );
+		maxX = Math.max( maxX, p[ 0 ], p[ 2 ] ); maxY = Math.max( maxY, p[ 1 ], p[ 3 ] );
 
 	}
-	const ordered = [ remaining.splice( first, 1 )[ 0 ] ];
-	while ( remaining.length ) {
+	const cell = Math.max( maxX - minX, maxY - minY, 1e-9 ) / Math.min( 128, Math.ceil( Math.sqrt( paths.length ) ) );
+	const grid = new Map(), used = new Uint8Array( paths.length ), ordered = [];
+	ends.forEach( ( p, i ) => {
 
-		const current = ordered[ ordered.length - 1 ];
-		const x = current[ current.length - 2 ], y = current[ current.length - 1 ];
-		let best = 0, reverse = false, bestD = Infinity;
-		for ( let i = 0; i < remaining.length; i ++ ) {
+		for ( const end of [ 0, 2 ] ) {
 
-			const p = remaining[ i ];
-			const startD = ( p[ 0 ] - x ) ** 2 + ( p[ 1 ] - y ) ** 2;
-			const endD = ( p[ p.length - 2 ] - x ) ** 2 + ( p[ p.length - 1 ] - y ) ** 2;
-			if ( startD < bestD ) { best = i; reverse = false; bestD = startD; }
-			if ( endD < bestD ) { best = i; reverse = true; bestD = endD; }
+			const key = `${ Math.floor( ( p[ end ] - minX ) / cell ) },${ Math.floor( ( p[ end + 1 ] - minY ) / cell ) }`;
+			if ( ! grid.has( key ) ) grid.set( key, [] );
+			grid.get( key ).push( { i, end } );
 
 		}
-		const next = remaining.splice( best, 1 )[ 0 ];
-		if ( reverse ) {
 
-			const reversed = [];
-			for ( let i = next.length - 2; i >= 0; i -= 2 ) reversed.push( next[ i ], next[ i + 1 ] );
-			ordered.push( reversed );
+	} );
+	let first = 0;
+	for ( let i = 1; i < paths.length; i ++ ) if ( ends[ i ][ 0 ] < ends[ first ][ 0 ] ) first = i;
+	ordered.push( paths[ first ] ); used[ first ] = 1;
+	let x = ends[ first ][ 2 ], y = ends[ first ][ 3 ];
+	while ( ordered.length < paths.length ) {
 
-		} else ordered.push( next );
+		const gx = Math.floor( ( x - minX ) / cell ), gy = Math.floor( ( y - minY ) / cell );
+		let best = - 1, bestEnd = 0, bestD = Infinity;
+		for ( let radius = 0; ; radius ++ ) {
+
+			for ( let dx = - radius; dx <= radius; dx ++ ) for ( let dy = - radius; dy <= radius; dy ++ ) {
+
+				if ( radius && Math.abs( dx ) !== radius && Math.abs( dy ) !== radius ) continue;
+				for ( const { i, end } of grid.get( `${ gx + dx },${ gy + dy }` ) || [] ) {
+
+					if ( used[ i ] ) continue;
+					const d = ( ends[ i ][ end ] - x ) ** 2 + ( ends[ i ][ end + 1 ] - y ) ** 2;
+					if ( d < bestD || d === bestD && ( i < best || i === best && end < bestEnd ) ) { best = i; bestEnd = end; bestD = d; }
+
+				}
+
+			}
+			const outside = Math.min( x - minX - ( gx - radius ) * cell, minX + ( gx + radius + 1 ) * cell - x,
+				y - minY - ( gy - radius ) * cell, minY + ( gy + radius + 1 ) * cell - y );
+			if ( best !== - 1 && outside ** 2 > bestD ) break;
+
+		}
+		used[ best ] = 1;
+		ordered.push( bestEnd ? reverse( paths[ best ] ) : paths[ best ] );
+		const nextEnd = bestEnd ? 0 : 2;
+		x = ends[ best ][ nextEnd ]; y = ends[ best ][ nextEnd + 1 ];
 
 	}
 	return ordered;
+
+}
+
+export function sortPlotterPolylines( polys ) {
+
+	return sortPaths( polys, p => [ p[ 0 ], p[ 1 ], p.at( - 2 ), p.at( - 1 ) ], p => {
+
+		const reversed = [];
+		for ( let i = p.length - 2; i >= 0; i -= 2 ) reversed.push( p[ i ], p[ i + 1 ] );
+		return reversed;
+
+	} );
+
+}
+
+export function sortPlotterCurves( paths ) {
+
+	return sortPaths( paths, p => [ ...p[ 0 ][ 0 ], ...p.at( - 1 )[ 3 ] ], p => p.slice().reverse().map( c => c.slice().reverse() ) );
 
 }

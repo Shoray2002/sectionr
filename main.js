@@ -27,8 +27,8 @@ import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeome
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
-import { sortPlotterPolylines } from './plotter.js';
-import { buildPolylines, simplifyPoly, fitPolyline, flattenCurves, curvesPath } from './linework.js';
+import { sortPlotterCurves } from './plotter.js';
+import { buildPolylines, simplifyPoly, fitPolyline, flattenCurves, curvesPath, cleanPlotterCurves } from './linework.js';
 
 const API = 'http://127.0.0.1:8787';
 
@@ -576,9 +576,9 @@ function rebuildLines( fitPreview = true ) {
 	const eps = rawMaxDim * 1e-4; // 0.03mm at the standard 300mm print size
 	const minLen = rawMaxDim * params.minLineFrac / 100;
 	const tolerance = rawMaxDim * params.simplifyFrac / 100;
-	const prepare = raw => sortPlotterPolylines( buildPolylines( raw, eps, minLen ).map( p =>
+	const prepare = raw => sortPlotterCurves( cleanPlotterCurves( buildPolylines( raw, eps, minLen ).map( p =>
 		simplifyPoly( p, ( tolerance * ( params.smoothCurves ? 0.25 : 1 ) ) ** 2 )
-	) ).map( p => fitPolyline( p, params.smoothCurves ? tolerance * 0.75 : 0 ) );
+	).map( p => fitPolyline( p, params.smoothCurves ? tolerance * 0.75 : 0 ) ), rawMaxDim * 1e-9 ) );
 	visCurves = prepare( rawVis );
 	hidCurves = prepare( rawHid );
 	visPolys = visCurves.map( c => flattenCurves( c, rawMaxDim / 300 * 0.01 ) );

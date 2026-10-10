@@ -3,6 +3,90 @@ import fitCurve from 'fit-curve';
 // Work on visibility-tested strokes, never on invented/lifted 3D contours.
 // Schneider's fit-curve implementation takes a SQUARED model-space tolerance.
 
+// Subtract only collinear retraces, including partial overlaps. Nearby parallel
+// details and crossings are not duplicates; never thin them by the pen width.
+export function removeOverlappingSegments( arr, epsilon ) {
+
+	if ( ! arr.length ) return [];
+	const segments = [];
+	let minX = Infinity, minY = Infinity, maxX = - Infinity, maxY = - Infinity;
+	for ( let i = 0; i < arr.length; i += 6 ) {
+
+		const a = [ arr[ i ], arr[ i + 2 ] ], b = [ arr[ i + 3 ], arr[ i + 5 ] ];
+		const length = Math.hypot( b[ 0 ] - a[ 0 ], b[ 1 ] - a[ 1 ] );
+		if ( ! length ) continue;
+		segments.push( { a, b, length } );
+		minX = Math.min( minX, a[ 0 ], b[ 0 ] ); minY = Math.min( minY, a[ 1 ], b[ 1 ] );
+		maxX = Math.max( maxX, a[ 0 ], b[ 0 ] ); maxY = Math.max( maxY, a[ 1 ], b[ 1 ] );
+
+	}
+	const cell = Math.max( Math.max( maxX - minX, maxY - minY ) / 128, epsilon * 4 );
+	const grid = new Map(), kept = [], out = [];
+	const cells = ( a, b ) => {
+
+		const keys = new Set();
+		const steps = Math.ceil( Math.max( Math.abs( b[ 0 ] - a[ 0 ] ), Math.abs( b[ 1 ] - a[ 1 ] ) ) / cell );
+		for ( let i = 0; i <= steps; i ++ ) {
+
+			const t = steps ? i / steps : 0;
+			const x = Math.floor( ( a[ 0 ] + t * ( b[ 0 ] - a[ 0 ] ) - minX ) / cell );
+			const y = Math.floor( ( a[ 1 ] + t * ( b[ 1 ] - a[ 1 ] ) - minY ) / cell );
+			for ( let dx = - 1; dx <= 1; dx ++ ) for ( let dy = - 1; dy <= 1; dy ++ ) keys.add( `${ x + dx },${ y + dy }` );
+
+		}
+		return keys;
+
+	};
+	// Retain the longest source strokes, avoiding fragmentation by tiny retraces.
+	for ( const { a, b, length } of segments.sort( ( a, b ) => b.length - a.length ) ) {
+
+		const ux = ( b[ 0 ] - a[ 0 ] ) / length, uy = ( b[ 1 ] - a[ 1 ] ) / length;
+		const candidates = new Set();
+		for ( const key of cells( a, b ) ) for ( const i of grid.get( key ) || [] ) candidates.add( i );
+		let intervals = [ [ 0, length ] ];
+		for ( const i of candidates ) {
+
+			const [ c, d ] = kept[ i ];
+			const cross = p => Math.abs( ux * ( p[ 1 ] - a[ 1 ] ) - uy * ( p[ 0 ] - a[ 0 ] ) );
+			if ( cross( c ) > epsilon || cross( d ) > epsilon ) continue;
+			const otherLength = Math.hypot( d[ 0 ] - c[ 0 ], d[ 1 ] - c[ 1 ] );
+			const otherCross = p => Math.abs( ( d[ 0 ] - c[ 0 ] ) * ( p[ 1 ] - c[ 1 ] ) - ( d[ 1 ] - c[ 1 ] ) * ( p[ 0 ] - c[ 0 ] ) ) / otherLength;
+			if ( otherCross( a ) > epsilon || otherCross( b ) > epsilon ) continue;
+			const t0 = ux * ( c[ 0 ] - a[ 0 ] ) + uy * ( c[ 1 ] - a[ 1 ] );
+			const t1 = ux * ( d[ 0 ] - a[ 0 ] ) + uy * ( d[ 1 ] - a[ 1 ] );
+			const lo = Math.min( t0, t1 ), hi = Math.max( t0, t1 );
+			intervals = intervals.flatMap( ( [ start, end ] ) => {
+
+				if ( hi <= start || lo >= end ) return [ [ start, end ] ];
+				const parts = [];
+				if ( lo > start ) parts.push( [ start, lo ] );
+				if ( hi < end ) parts.push( [ hi, end ] );
+				return parts;
+
+			} );
+			if ( ! intervals.length ) break;
+
+		}
+		for ( const [ start, end ] of intervals ) {
+
+			const c = start === 0 ? a : [ a[ 0 ] + ux * start, a[ 1 ] + uy * start ];
+			const d = end === length ? b : [ a[ 0 ] + ux * end, a[ 1 ] + uy * end ];
+			const i = kept.length;
+			kept.push( [ c, d ] ); out.push( c[ 0 ], 0, c[ 1 ], d[ 0 ], 0, d[ 1 ] );
+			for ( const key of cells( c, d ) ) {
+
+				if ( ! grid.has( key ) ) grid.set( key, [] );
+				grid.get( key ).push( i );
+
+			}
+
+		}
+
+	}
+	return out;
+
+}
+
 export function buildPolylines( arr, eps, minLen ) {
 
 	const q = 1 / eps;
@@ -242,5 +326,75 @@ export function curvesPath( paths, minX, minZ ) {
 		).join( '' );
 
 	} ).join( '' );
+
+}
+
+// Keep actual cubics: raster skeletons and curve refitting would change the art.
+export function cleanPlotterCurves( paths, epsilon ) {
+
+	const lines = [], curves = [], seen = new Set();
+	for ( const path of paths ) for ( const c of path ) {
+
+		const [ a, , , b ] = c;
+		const dx = b[ 0 ] - a[ 0 ], dy = b[ 1 ] - a[ 1 ], length = Math.hypot( dx, dy );
+		const length2 = dx * dx + dy * dy;
+		if ( length && c.slice( 1, 3 ).every( p => {
+
+			const dot = ( p[ 0 ] - a[ 0 ] ) * dx + ( p[ 1 ] - a[ 1 ] ) * dy;
+			return Math.abs( dx * ( p[ 1 ] - a[ 1 ] ) - dy * ( p[ 0 ] - a[ 0 ] ) ) <= epsilon * length && dot >= 0 && dot <= length2;
+
+		} ) ) {
+
+			lines.push( a[ 0 ], 0, a[ 1 ], b[ 0 ], 0, b[ 1 ] );
+			continue;
+
+		}
+		const key = JSON.stringify( c ), reverse = JSON.stringify( c.slice().reverse() );
+		if ( seen.has( key ) || seen.has( reverse ) ) continue;
+		seen.add( key ); curves.push( c );
+
+	}
+	const unique = removeOverlappingSegments( lines, epsilon );
+	for ( let i = 0; i < unique.length; i += 6 ) {
+
+		const a = [ unique[ i ], unique[ i + 2 ] ], b = [ unique[ i + 3 ], unique[ i + 5 ] ];
+		curves.push( [ a, a, b, b ] );
+
+	}
+	// Exact shared endpoints can be plotted continuously, even at junctions.
+	const key = p => `${ p[ 0 ].toFixed( 6 ) },${ p[ 1 ].toFixed( 6 ) }`;
+	const adjacent = new Map();
+	curves.forEach( ( c, i ) => {
+
+		for ( const p of [ c[ 0 ], c[ 3 ] ] ) {
+
+			const k = key( p );
+			if ( ! adjacent.has( k ) ) adjacent.set( k, [] );
+			adjacent.get( k ).push( i );
+
+		}
+
+	} );
+	const used = new Set(), result = [];
+	const walk = start => {
+
+		let at = start;
+		const path = [];
+		for ( ;; ) {
+
+			const next = adjacent.get( at ).find( i => ! used.has( i ) );
+			if ( next === undefined ) break;
+			used.add( next );
+			const c = curves[ next ];
+			const directed = key( c[ 0 ] ) === at ? c : c.slice().reverse();
+			path.push( directed ); at = key( directed[ 3 ] );
+
+		}
+		if ( path.length ) result.push( path );
+
+	};
+	for ( const [ k, edges ] of adjacent ) if ( edges.length % 2 ) walk( k );
+	for ( const k of adjacent.keys() ) walk( k );
+	return result;
 
 }

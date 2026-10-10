@@ -1,8 +1,41 @@
 // node --test linework.test.js
 import assert from 'node:assert/strict';
-import { buildPolylines, simplifyPoly, fitPolyline, flattenCurves, curvesPath } from './linework.js';
+import { buildPolylines, simplifyPoly, fitPolyline, flattenCurves, curvesPath, removeOverlappingSegments, cleanPlotterCurves, polyLen } from './linework.js';
 
 const segment = ( x, z, x2, z2 ) => [ x, 0, z, x2, 0, z2 ];
+const segmentLength = arr => {
+
+	let length = 0;
+	for ( let i = 0; i < arr.length; i += 6 ) length += Math.hypot( arr[ i + 3 ] - arr[ i ], arr[ i + 5 ] - arr[ i + 2 ] );
+	return length;
+
+};
+const overlaps = [ ...segment( 0, 0, 10, 0 ), ...segment( 5, 0, 15, 0 ), ...segment( 8, 0, 2, 0 ) ];
+assert.equal( segmentLength( removeOverlappingSegments( overlaps, 1e-8 ) ), 15, 'partial, nested and reversed retraces are drawn once' );
+const gap = [ ...segment( 0, 0, 1, 0 ), ...segment( 1.0001, 0, 2, 0 ) ];
+assert.equal( segmentLength( removeOverlappingSegments( gap, 1e-6 ) ), segmentLength( gap ), 'never bridge visibility gaps' );
+const distinct = [ ...segment( 0, 0, 10, 0 ), ...segment( 0, 0.001, 10, 0.001 ), ...segment( 5, -1, 5, 1 ) ];
+assert.equal( segmentLength( removeOverlappingSegments( distinct, 1e-6 ) ), 22, 'preserve close parallel features and crossings' );
+const diagonal = [ ...segment( -3, -3, 5, 5 ), ...segment( -1, -1, 3, 3 ), ...segment( 5, 5, 8, 8 ) ];
+assert( Math.abs( segmentLength( removeOverlappingSegments( diagonal, 1e-8 ) ) - 11 * Math.SQRT2 ) < 1e-10 );
+assert.deepEqual( removeOverlappingSegments( [], 1e-6 ), [] );
+const fractionalRetrace = [ fitPolyline( [ 0, 0, 0.1, 0.2 ], 0 ), fitPolyline( [ 0.02, 0.04, 0.08, 0.16 ], 0 ) ];
+const fractionalClean = cleanPlotterCurves( fractionalRetrace, 1e-8 );
+assert( Math.abs( fractionalClean.reduce( ( s, p ) => s + polyLen( flattenCurves( p, 1e-6 ) ), 0 ) - Math.hypot( 0.1, 0.2 ) ) < 1e-10, 'hypot rounding must not classify a straight retrace as curved' );
+
+const cubic = [ [ 0, 0 ], [ 0, 5 ], [ 10, 5 ], [ 10, 0 ] ];
+const cleanSource = [ [ cubic ], [ cubic.slice().reverse() ], fitPolyline( [ 10, 0, 15, 0 ], 0 ), fitPolyline( [ 12, 0, 20, 0 ], 0 ) ];
+const sourceCopy = structuredClone( cleanSource );
+const cleaned = cleanPlotterCurves( cleanSource, 1e-8 );
+assert.deepEqual( cleanSource, sourceCopy, 'do not mutate existing fitted curves' );
+assert.equal( cleaned.length, 1, 'shared endpoints do not need pen lifts' );
+assert( cleaned.flat().some( c => JSON.stringify( c ) === JSON.stringify( cubic ) || JSON.stringify( c.slice().reverse() ) === JSON.stringify( cubic ) ), 'retain the original nonlinear control points' );
+assert( Math.abs( cleaned.reduce( ( s, p ) => s + polyLen( flattenCurves( p, 0.0001 ) ), 0 ) - polyLen( flattenCurves( [ cubic ], 0.0001 ) ) - 10 ) < 1e-8 );
+const loop = [ [ 0, 0 ], [ 10, 0 ], [ 0, 10 ], [ 0, 0 ] ];
+assert.deepEqual( cleanPlotterCurves( [ [ loop ] ], 1e-8 ), [ [ loop ] ], 'do not discard a closed cubic as a zero-length segment' );
+const backtrack = [ [ 0, 0 ], [ -5, 0 ], [ 15, 0 ], [ 10, 0 ] ];
+assert.deepEqual( cleanPlotterCurves( [ [ backtrack ] ], 1e-8 ), [ [ backtrack ] ], 'collinear control points outside the endpoints still describe real geometry' );
+
 // Endpoints across neighboring grid cells must join; visible gaps must not.
 assert.equal( buildPolylines( [ ...segment( 0, 0, 0.99, 0 ), ...segment( 1.01, 0, 2, 0 ) ], 0.03, 0 ).length, 1 );
 assert.equal( buildPolylines( [ ...segment( 0, 0, 0.9, 0 ), ...segment( 1.1, 0, 2, 0 ) ], 0.03, 0 ).length, 2 );
