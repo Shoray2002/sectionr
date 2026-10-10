@@ -1,0 +1,66 @@
+name: Build macOS app
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22.20.0'
+          cache: npm
+
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: '2.8.3'
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          rustup default 1.96.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install dependencies
+        run: |
+          # The locked projection dependency is public; no SSH key is needed.
+          git config --global url."https://github.com/".insteadOf ssh://git@github.com/
+          npm ci
+
+      - name: Test
+        run: |
+          node --test ./*.test.js scripts/clean-svg.test.js
+          deno run -A server/parallel-edges.test.js
+
+      - name: Build app and installer
+        env:
+          APPLE_SIGNING_IDENTITY: '-'
+        run: |
+          mkdir -p src-tauri/binaries
+          npm run tauri -- build --bundles app,dmg --ci
+
+      - name: Verify app bundle
+        run: |
+          codesign --verify --deep --strict src-tauri/target/release/bundle/macos/sectionr.app
+          test -x src-tauri/target/release/bundle/macos/sectionr.app/Contents/MacOS/sectionr-sidecar
+          test "$(lipo -archs src-tauri/target/release/bundle/macos/sectionr.app/Contents/MacOS/sectionr-sidecar)" = arm64
+
+      - name: Upload installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sectionr-macos-arm64-${{ github.sha }}
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 30
